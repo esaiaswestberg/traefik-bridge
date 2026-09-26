@@ -1,7 +1,7 @@
 GO ?= go
 BIN_DIR ?= bin
 
-.PHONY: build build-linux check fmt generate lint test integration-docker-provider
+.PHONY: build build-linux check fmt generate lint test integration-docker-provider docker-build docker-build-master docker-build-slave docker-build-proxy
 
 build:
 	$(GO) build ./cmd/...
@@ -31,3 +31,14 @@ test:
 
 integration-docker-provider:
 	./tests/integration/docker-provider/run.sh
+
+docker-build: docker-build-master docker-build-slave docker-build-proxy
+
+docker-build-master:
+	docker build -f deploy/docker/Dockerfile.master -t traefik-bridge-master:local .
+
+docker-build-slave:
+	docker build -f deploy/docker/Dockerfile.slave -t traefik-bridge-slave:local .
+
+docker-build-proxy:
+	docker build -f deploy/docker/Dockerfile.proxy -t traefik-bridge-proxy:local .

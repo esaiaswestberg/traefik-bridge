@@ -1,0 +1,13 @@
+services:
+  bridge-slave:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.slave
+    image: traefik-bridge-slave:local
+    environment:
+      BRIDGE_CLUSTER_SECRET:
+      BRIDGE_MASTER_ADDRESS: ${BRIDGE_MASTER_ADDRESS:?set BRIDGE_MASTER_ADDRESS to the private master address}
+      BRIDGE_DATA_ADDRESS: ${BRIDGE_DATA_ADDRESS:?set BRIDGE_DATA_ADDRESS to this host's private address}
+    volumes:
+      # Keep this read-only; slave only discovers local application containers.
+      - /var/run/docker.sock:/var/run/docker.sock:ro

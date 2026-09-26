@@ -1,0 +1,11 @@
+# Mount this file and the master-issued certificates into Traefik. Generated
+# Docker services refer to this transport as bridge-mtls@file.
+http:
+  serversTransports:
+    bridge-mtls:
+      rootCAs:
+        - /bridge/certs/ca.crt
+      certificates:
+        - certFile: /bridge/certs/master-client.crt
+          keyFile: /bridge/certs/master-client.key
+      insecureSkipVerify: false

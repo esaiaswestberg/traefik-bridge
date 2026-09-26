@@ -1,0 +1,40 @@
+services:
+  traefik:
+    image: traefik:v3.6.25
+    command:
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.file.filename=/etc/traefik/bridge-transport.yml
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ../../deploy/traefik/bridge-transport.yml:/etc/traefik/bridge-transport.yml:ro
+      - bridge-master-data:/bridge:ro
+
+  bridge-master:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.master
+    image: traefik-bridge-master:local
+    environment:
+      BRIDGE_CLUSTER_SECRET:
+      BRIDGE_DATA_DIR: /bridge
+      BRIDGE_PROXY_IMAGE: traefik-bridge-proxy:local
+    volumes:
+      # Docker socket access lets master control containers on this host.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - bridge-master-data:/bridge
+
+  bridge-proxy-image:
+    profiles: [image-build]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.proxy
+    image: traefik-bridge-proxy:local
+
+volumes:
+  bridge-master-data:

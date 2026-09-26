@@ -1,0 +1,11 @@
+.git
+.github
+bin
+dist
+coverage.out
+tests
+IMPLEMENTATION_PLAN.md
+README.md
+docs
+examples
+deploy
