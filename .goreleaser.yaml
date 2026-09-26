@@ -1,0 +1,46 @@
+version: 2
+
+  hooks:
+    - go mod tidy
+
+  - id: bridge-master
+    main: ./cmd/bridge-master
+    binary: bridge-master
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+  - id: bridge-slave
+    main: ./cmd/bridge-slave
+    binary: bridge-slave
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+  - id: bridge-proxy
+    main: ./cmd/bridge-proxy
+    binary: bridge-proxy
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  draft: false
