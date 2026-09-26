@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -129,6 +130,98 @@ func TestExpiredRouteRejectedAfterGrace(t *testing.T) {
 	if got, want := response.Code, http.StatusForbidden; got != want {
 		t.Errorf("status = %d, want %d", got, want)
 	}
+}
+
+func TestSlaveHealthChecksUseNormalRoutingAndRecoverTargets(t *testing.T) {
+	var firstHealthy atomic.Bool
+	var healthPath atomic.Value
+	first := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/health/ready" {
+			if request.URL.RequestURI() != "/health/ready?full=true" {
+				t.Errorf("health request URI = %q", request.URL.RequestURI())
+			}
+			healthPath.Store(request.URL.RequestURI())
+		}
+		if !firstHealthy.Load() {
+			http.Error(writer, "unhealthy", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = writer.Write([]byte("first"))
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = writer.Write([]byte("second"))
+	}))
+	defer second.Close()
+
+	signer, err := NewSigner([]byte("test route signing key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	slave, err := NewSlave(SlaveConfig{Signer: signer, Services: map[string][]*url.URL{"service": {mustURL(t, first.URL), mustURL(t, second.URL)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer slave.Close()
+	check := HealthCheck{Path: "/health/ready?full=true", Scheme: "http", Timeout: time.Second}
+	slave.checkTarget(t.Context(), "service", 0, check)
+	if got := healthPath.Load(); got != "/health/ready?full=true" {
+		t.Fatalf("health path = %v", got)
+	}
+	if got := slave.Status()["service"][0].Healthy; got {
+		t.Fatal("failed target remained healthy")
+	}
+	if got := serveSlave(t, slave, signer, "service"); got != "second" {
+		t.Fatalf("response from unhealthy pool = %q, want second", got)
+	}
+
+	firstHealthy.Store(true)
+	slave.checkTarget(t.Context(), "service", 0, check)
+	if got := slave.Status()["service"][0].Healthy; !got {
+		t.Fatal("recovered target remained unhealthy")
+	}
+	if got := serveSlave(t, slave, signer, "service"); got != "first" {
+		t.Fatalf("response after recovery = %q, want first", got)
+	}
+}
+
+func TestSlaveHealthCheckPreservesHTTPS(t *testing.T) {
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/secure-health" {
+			t.Errorf("health path = %q", request.URL.Path)
+		}
+		_, _ = writer.Write([]byte("healthy"))
+	}))
+	defer backend.Close()
+	signer, err := NewSigner([]byte("test route signing key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	slave, err := NewSlave(SlaveConfig{Signer: signer, Services: map[string][]*url.URL{"service": {mustURL(t, backend.URL)}}, Transport: backend.Client().Transport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer slave.Close()
+	slave.checkTarget(t.Context(), "service", 0, HealthCheck{Path: "/secure-health", Scheme: "https", Timeout: time.Second})
+	if got := slave.Status()["service"][0]; !got.Healthy {
+		t.Fatalf("HTTPS target status = %+v", got)
+	}
+}
+
+func serveSlave(t *testing.T, slave *Slave, signer *Signer, service string) string {
+	t.Helper()
+	token, err := signer.Sign(Route{RouteID: "route", ServiceID: service, ExpiresAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://bridge/", nil)
+	request.Header.Set(RouteHeader, token)
+	response := httptest.NewRecorder()
+	slave.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
+	}
+	return response.Body.String()
 }
 
 func mustURL(t *testing.T, raw string) *url.URL {

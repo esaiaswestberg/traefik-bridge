@@ -2,6 +2,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
@@ -150,10 +151,26 @@ func NewMaster(config MasterConfig) (http.Handler, error) {
 
 // SlaveConfig configures validation and local target pools for a slave listener.
 type SlaveConfig struct {
-	Signer    *Signer
-	Grace     time.Duration
-	Services  map[string][]*url.URL
-	Transport http.RoundTripper
+	Signer       *Signer
+	Grace        time.Duration
+	Services     map[string][]*url.URL
+	HealthChecks map[string]HealthCheck
+	Transport    http.RoundTripper
+}
+
+// HealthCheck describes a local target health endpoint. Path and Scheme are
+// applied to the outbound request without changing normal request routing.
+type HealthCheck struct {
+	Path     string
+	Scheme   string
+	Interval time.Duration
+	Timeout  time.Duration
+}
+
+// TargetHealth is the current health state of one local service target.
+type TargetHealth struct {
+	Target  string
+	Healthy bool
 }
 
 // Slave validates bridge routes then forwards to round-robin local service targets.
@@ -162,12 +179,18 @@ type Slave struct {
 	grace     time.Duration
 	pools     map[string]*targetPool
 	transport http.RoundTripper
+	cancel    context.CancelFunc
 }
 
 type targetPool struct {
-	targets []*url.URL
+	targets []target
 	next    uint64
 	mu      sync.Mutex
+}
+
+type target struct {
+	url     *url.URL
+	healthy bool
 }
 
 // NewSlave creates a slave data listener handler.
@@ -183,17 +206,41 @@ func NewSlave(config SlaveConfig) (*Slave, error) {
 		if service == "" || len(targets) == 0 {
 			return nil, errors.New("every service requires a target")
 		}
-		pool := &targetPool{targets: make([]*url.URL, len(targets))}
-		for i, target := range targets {
-			if target == nil || target.Scheme == "" || target.Host == "" {
+		pool := &targetPool{targets: make([]target, len(targets))}
+		for i, targetURL := range targets {
+			if targetURL == nil || targetURL.Scheme == "" || targetURL.Host == "" {
 				return nil, fmt.Errorf("service %q has an invalid target", service)
 			}
-			copy := *target
-			pool.targets[i] = &copy
+			copy := *targetURL
+			pool.targets[i] = target{url: &copy, healthy: true}
 		}
 		pools[service] = pool
 	}
-	return &Slave{signer: config.Signer, grace: config.Grace, pools: pools, transport: config.Transport}, nil
+	checks := make(map[string]HealthCheck, len(config.HealthChecks))
+	for service, check := range config.HealthChecks {
+		if pools[service] == nil {
+			return nil, fmt.Errorf("health check references unknown service %q", service)
+		}
+		if check.Path == "" || check.Path[0] != '/' {
+			return nil, fmt.Errorf("health check for service %q requires an absolute path", service)
+		}
+		if check.Scheme != "" && check.Scheme != "http" && check.Scheme != "https" {
+			return nil, fmt.Errorf("health check for service %q has an invalid scheme", service)
+		}
+		if check.Interval <= 0 {
+			check.Interval = 30 * time.Second
+		}
+		if check.Timeout <= 0 {
+			check.Timeout = 5 * time.Second
+		}
+		checks[service] = check
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	slave := &Slave{signer: config.Signer, grace: config.Grace, pools: pools, transport: config.Transport, cancel: cancel}
+	for service, check := range checks {
+		go slave.runHealthChecks(ctx, service, check)
+	}
+	return slave, nil
 }
 
 // ServeHTTP validates the route token before proxying to the selected local target.
@@ -208,7 +255,11 @@ func (s *Slave) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 		http.Error(response, "unknown bridge service", http.StatusNotFound)
 		return
 	}
-	target := pool.target()
+	target, ok := pool.target(request.Context())
+	if !ok {
+		http.Error(response, "bridge service has no healthy targets", http.StatusServiceUnavailable)
+		return
+	}
 	proxy := &httputil.ReverseProxy{
 		Transport: s.transport,
 		Rewrite: func(proxyRequest *httputil.ProxyRequest) {
@@ -222,10 +273,128 @@ func (s *Slave) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	proxy.ServeHTTP(response, request)
 }
 
-func (p *targetPool) target() *url.URL {
+type healthTargetContextKey struct{}
+
+type healthTarget struct {
+	index int
+	url   *url.URL
+}
+
+func (p *targetPool) target(ctx context.Context) (*url.URL, bool) {
 	p.mu.Lock()
-	target := p.targets[p.next%uint64(len(p.targets))]
-	p.next++
-	p.mu.Unlock()
-	return target
+	defer p.mu.Unlock()
+	if healthTarget, ok := ctx.Value(healthTargetContextKey{}).(healthTarget); ok {
+		if healthTarget.index < 0 || healthTarget.index >= len(p.targets) {
+			return nil, false
+		}
+		return healthTarget.url, true
+	}
+	for offset := range p.targets {
+		index := (p.next + uint64(offset)) % uint64(len(p.targets))
+		if p.targets[index].healthy {
+			p.next = index + 1
+			return p.targets[index].url, true
+		}
+	}
+	return nil, false
+}
+
+// Close stops the in-process health checkers.
+func (s *Slave) Close() {
+	if s != nil && s.cancel != nil {
+		s.cancel()
+	}
+}
+
+// Status returns a consistent, testable snapshot of local target health.
+func (s *Slave) Status() map[string][]TargetHealth {
+	status := make(map[string][]TargetHealth, len(s.pools))
+	for service, pool := range s.pools {
+		pool.mu.Lock()
+		targets := make([]TargetHealth, len(pool.targets))
+		for i, target := range pool.targets {
+			targets[i] = TargetHealth{Target: target.url.String(), Healthy: target.healthy}
+		}
+		pool.mu.Unlock()
+		status[service] = targets
+	}
+	return status
+}
+
+func (s *Slave) runHealthChecks(ctx context.Context, service string, check HealthCheck) {
+	s.checkService(ctx, service, check)
+	ticker := time.NewTicker(check.Interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.checkService(ctx, service, check)
+		}
+	}
+}
+
+func (s *Slave) checkService(ctx context.Context, service string, check HealthCheck) {
+	pool := s.pools[service]
+	if pool == nil {
+		return
+	}
+	pool.mu.Lock()
+	count := len(pool.targets)
+	pool.mu.Unlock()
+	for index := range count {
+		s.checkTarget(ctx, service, index, check)
+	}
+}
+
+func (s *Slave) checkTarget(ctx context.Context, service string, index int, check HealthCheck) {
+	pool := s.pools[service]
+	if pool == nil {
+		return
+	}
+	pool.mu.Lock()
+	if index < 0 || index >= len(pool.targets) {
+		pool.mu.Unlock()
+		return
+	}
+	target := *pool.targets[index].url
+	pool.mu.Unlock()
+	if check.Scheme != "" {
+		target.Scheme = check.Scheme
+	}
+	ctx, cancel := context.WithTimeout(ctx, check.Timeout)
+	defer cancel()
+	route, err := s.signer.Sign(Route{RouteID: "health-check", ServiceID: service, ExpiresAt: s.signer.now().Add(check.Timeout)})
+	if err != nil {
+		return
+	}
+	request, err := http.NewRequestWithContext(context.WithValue(ctx, healthTargetContextKey{}, healthTarget{index: index, url: &target}), http.MethodGet, "http://bridge"+check.Path, nil)
+	if err != nil {
+		return
+	}
+	request.Header.Set(RouteHeader, route)
+	response := &healthResponseWriter{header: make(http.Header)}
+	s.ServeHTTP(response, request)
+	pool.mu.Lock()
+	pool.targets[index].healthy = response.status >= http.StatusOK && response.status < http.StatusMultipleChoices
+	pool.mu.Unlock()
+}
+
+type healthResponseWriter struct {
+	header http.Header
+	status int
+}
+
+func (w *healthResponseWriter) Header() http.Header { return w.header }
+func (w *healthResponseWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+}
+func (w *healthResponseWriter) Write(value []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return len(value), nil
 }
