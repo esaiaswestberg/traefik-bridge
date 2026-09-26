@@ -8,13 +8,33 @@ Build the three images from the repository root:
 make docker-build
 ```
 
-For a two-host deployment, follow [the Compose example](../examples/two-host/README.md). Mount `deploy/traefik/bridge-transport.yml` in Traefik and provide the master-issued CA and client certificate files at the paths it names.
+For a two-host deployment, follow [the Compose example](../examples/two-host/README.md). Mount `deploy/traefik/bridge-transport.yml` in Traefik and provide the master-issued CA and client certificate files at the paths it names. The master control listener defaults to `8443` in its container; the example publishes it as Host 1 port `9443`. The slave data listener is `8444` in its container and is published as Host 2 port `9444`.
 
 ## Slave credentials
 
 `bridge-slave` only starts with provisioned mTLS and route-signing material. Configure `BRIDGE_SLAVE_ID`, `BRIDGE_CA_FILE`, `BRIDGE_CERTIFICATE_FILE`, `BRIDGE_PRIVATE_KEY_FILE`, and `BRIDGE_ROUTE_SIGNING_KEY_FILE`, along with the master and data addresses and `BRIDGE_DOCKER_NETWORK`. The slave certificate must identify the configured slave ID and be issued by the same CA used by the master.
 
 The certificate, private key, CA, and route-signing key must be delivered by an authenticated deployment workflow and mounted read-only. Enrollment is not implemented: in particular, this project does not accept a shared secret, token, or unauthenticated request to issue a slave certificate until an audited PAKE enrollment flow exists.
+
+## Offline certificate provisioning
+
+The repository supports a local, operator-controlled CSR workflow. It has no network listener and does not replace PAKE enrollment. Generate the private key and CSR on the slave host, keeping the key there:
+
+```sh
+umask 077
+openssl ecparam -name prime256v1 -genkey -noout -out slave.key
+openssl req -new -key slave.key -out slave.csr -subj '/CN=remote-host-1' -addext 'subjectAltName=DNS:slave.internal.example'
+```
+
+On Host 1, stop the master before accessing its state volume. Sign the CSR only after independently authenticating the provisioning request. The command refuses to overwrite an existing slave identity unless `-replace` is explicit; replacement immediately makes the old certificate unacceptable.
+
+```sh
+docker compose -f examples/two-host/compose.master.yml stop bridge-master
+docker compose -f examples/two-host/compose.master.yml run --rm --no-deps --entrypoint bridge-provision -v /secure/requests:/requests:ro -v /secure/bridge-slave-credentials:/output bridge-master -slave-id remote-host-1 -data-host slave.internal.example -csr /requests/slave.csr -output-dir /output
+docker compose -f examples/two-host/compose.master.yml up -d bridge-master
+```
+
+`-data-host` must exactly match the host in `BRIDGE_DATA_ADDRESS`; it rejects CSRs without that DNS or IP subject alternative name. Place `slave.key` and the same `route-signing.key` in `/secure/bridge-slave-credentials` on the slave host. Copy `ca.crt` and `slave.crt` from the provisioning output to that directory through an authenticated out-of-band channel.
 
 ## Master proxy credentials
 

@@ -95,7 +95,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	dataListener, err := net.Listen("tcp", cfg.DataAddress)
+	dataListener, err := net.Listen("tcp", cfg.DataListenAddress)
 	if err != nil {
 		return fmt.Errorf("listen for data traffic: %w", err)
 	}
@@ -113,7 +113,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	go func() { errs <- discovery.Run(ctx) }()
 	go func() { errs <- client.Run(ctx) }()
 	ready.Store(true)
-	logger.Info("bridge-slave started", "master_address", cfg.MasterAddress, "data_address", cfg.DataAddress, "observability_address", cfg.ObservabilityAddress)
+	logger.Info("bridge-slave started", "master_address", cfg.MasterAddress, "data_address", cfg.DataAddress, "data_listen_address", cfg.DataListenAddress, "observability_address", cfg.ObservabilityAddress)
 	var serveErr error
 	select {
 	case <-ctx.Done():

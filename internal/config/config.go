@@ -33,6 +33,7 @@ type Slave struct {
 	MasterAddress        string
 	MasterServerName     string
 	DataAddress          string
+	DataListenAddress    string
 	ObservabilityAddress string
 	DockerHost           string
 	DefaultNetwork       string
@@ -117,6 +118,7 @@ func loadSlave(getenv func(string) string) (Slave, error) {
 		MasterAddress:        strings.TrimSpace(getenv("BRIDGE_MASTER_ADDRESS")),
 		MasterServerName:     value(getenv, "BRIDGE_MASTER_SERVER_NAME", "bridge-master"),
 		DataAddress:          strings.TrimSpace(getenv("BRIDGE_DATA_ADDRESS")),
+		DataListenAddress:    value(getenv, "BRIDGE_DATA_LISTEN_ADDRESS", getenv("BRIDGE_DATA_ADDRESS")),
 		ObservabilityAddress: value(getenv, "BRIDGE_OBSERVABILITY_ADDRESS", ":8080"),
 		DockerHost:           value(getenv, "BRIDGE_DOCKER_HOST", defaultDockerHost),
 		DefaultNetwork:       strings.TrimSpace(getenv("BRIDGE_DOCKER_NETWORK")),
@@ -129,8 +131,14 @@ func loadSlave(getenv func(string) string) (Slave, error) {
 	if config.MasterAddress == "" {
 		return Slave{}, errors.New("BRIDGE_MASTER_ADDRESS is required")
 	}
+	if config.MasterServerName != "bridge-master" {
+		return Slave{}, errors.New("BRIDGE_MASTER_SERVER_NAME must be bridge-master for the current master certificate")
+	}
 	if config.DataAddress == "" {
 		return Slave{}, errors.New("BRIDGE_DATA_ADDRESS is required")
+	}
+	if config.DataListenAddress == "" {
+		return Slave{}, errors.New("BRIDGE_DATA_LISTEN_ADDRESS is required")
 	}
 	if config.DefaultNetwork == "" {
 		return Slave{}, errors.New("BRIDGE_DOCKER_NETWORK is required")

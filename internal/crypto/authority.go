@@ -38,12 +38,22 @@ type Authority struct {
 
 // Initialize loads an existing authority or creates and persists a new one.
 func Initialize(store *state.Store) (*Authority, error) {
+	return load(store, true)
+}
+
+// Load opens an existing authority. Unlike Initialize, it never creates
+// certificate authority state, which makes it suitable for offline operators.
+func Load(store *state.Store) (*Authority, error) {
+	return load(store, false)
+}
+
+func load(store *state.Store, create bool) (*Authority, error) {
 	if store == nil {
 		return nil, errors.New("state store is required")
 	}
 
 	persisted, err := store.Load()
-	if state.IsNotExist(err) {
+	if create && state.IsNotExist(err) {
 		persisted, err = newState()
 		if err == nil {
 			err = store.Save(persisted)
@@ -85,6 +95,36 @@ func (a *Authority) MatchesSlave(slaveID string, cert *x509.Certificate) bool {
 
 // CACertificate returns the PEM-encoded bridge CA certificate.
 func (a *Authority) CACertificate() []byte { return append([]byte(nil), a.state.CA.CertificatePEM...) }
+
+// HasSlave reports whether slaveID already has an active tracked certificate.
+func (a *Authority) HasSlave(slaveID string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, ok := a.state.Slaves[slaveID]
+	return ok
+}
+
+// ExportSlavePEM writes the CA certificate and issued slave certificate for
+// manual installation. The corresponding private key remains with the CSR
+// generator and is never handled by the master.
+func (a *Authority) ExportSlavePEM(dir string, certificate []byte) error {
+	if strings.TrimSpace(dir) == "" {
+		return errors.New("certificate directory is required")
+	}
+	if len(certificate) == 0 {
+		return errors.New("slave certificate is required")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create certificate directory: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("secure certificate directory: %w", err)
+	}
+	if err := writePEM(filepath.Join(dir, "ca.crt"), a.state.CA.CertificatePEM, 0o644); err != nil {
+		return err
+	}
+	return writePEM(filepath.Join(dir, "slave.crt"), certificate, 0o644)
+}
 
 // ExportPEM atomically writes the CA and master client TLS material for
 // Traefik's shared ServersTransport. Private keys remain owner-readable only.

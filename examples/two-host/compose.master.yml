@@ -14,7 +14,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ../../deploy/traefik/bridge-transport.yml:/etc/traefik/bridge-transport.yml:ro
       - bridge-master-data:/bridge:ro
-
+    networks:
+      - bridge
   bridge-master:
     build:
       context: ../..
@@ -25,12 +26,19 @@ services:
       BRIDGE_PROXY_IMAGE: traefik-bridge-proxy:local
       BRIDGE_ROUTE_SIGNING_KEY_FILE: /run/secrets/route.key
       BRIDGE_PROXY_CERTIFICATE_MOUNT: bridge-master-data:/bridge
+    ports:
+      - "9443:8443"
     volumes:
       # Docker socket access lets master control containers on this host.
       - /var/run/docker.sock:/var/run/docker.sock
       - bridge-master-data:/bridge
     secrets:
       - route.key
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/readyz >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
   bridge-proxy-image:
     profiles: [image-build]
@@ -39,9 +47,16 @@ services:
       dockerfile: deploy/docker/Dockerfile.proxy
     image: traefik-bridge-proxy:local
 
+networks:
+  # This existing local network must have the same name supplied by each slave.
+  # Generated proxies join it so Traefik can reach their dynamic listener ports.
+  bridge:
+    name: ${BRIDGE_DOCKER_NETWORK:?set BRIDGE_DOCKER_NETWORK to the local proxy network}
+    external: true
+
 volumes:
   bridge-master-data:
 
 secrets:
   route.key:
-    file: ./route.key
+    file: ./secrets/route.key
