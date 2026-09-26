@@ -34,7 +34,16 @@ var _ ReconcileClient = (*Adapter)(nil)
 // NewAdapter connects to the Docker daemon configured by the standard Docker
 // environment variables, defaulting to the local Unix socket.
 func NewAdapter() (*Adapter, error) {
-	sdk, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	return newAdapter(client.FromEnv)
+}
+
+// NewAdapterForHost connects to host rather than relying on process environment.
+func NewAdapterForHost(host string) (*Adapter, error) {
+	return newAdapter(client.WithHost(host))
+}
+
+func newAdapter(option client.Opt) (*Adapter, error) {
+	sdk, err := client.NewClientWithOpts(option, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("create Docker client: %w", err)
 	}
