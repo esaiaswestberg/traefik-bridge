@@ -46,7 +46,25 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	pair, ca, routeKey, err := loadCredentials(cfg)
 	if err != nil {
-		return err
+		if !errors.Is(err, os.ErrNotExist) || cfg.EnrollmentSecretFile == "" {
+			return err
+		}
+		secret, readErr := os.ReadFile(cfg.EnrollmentSecretFile)
+		if readErr != nil {
+			return fmt.Errorf("read development enrollment secret: %w", readErr)
+		}
+		bootstrapCA, readErr := os.ReadFile(cfg.EnrollmentCAFile)
+		if readErr != nil {
+			return fmt.Errorf("read enrollment CA: %w", readErr)
+		}
+		pair, ca, _, err = bridgecontrol.Enroll(ctx, bridgecontrol.EnrollmentClientConfig{Address: cfg.EnrollmentAddress, ServerName: cfg.MasterServerName, BootstrapCA: bootstrapCA, Secret: secret, SlaveID: cfg.SlaveID, CertificateFile: cfg.CertificateFile, PrivateKeyFile: cfg.PrivateKeyFile, CAFile: cfg.CAFile, CSRFile: cfg.EnrollmentCSRFile})
+		if err != nil {
+			return fmt.Errorf("development enrollment: %w", err)
+		}
+		routeKey, readErr = os.ReadFile(cfg.RouteSigningKeyFile)
+		if readErr != nil {
+			return fmt.Errorf("read route signing key: %w", readErr)
+		}
 	}
 	clientTLS, err := bridgecontrol.TLSConfig(pair, ca, cfg.MasterServerName)
 	if err != nil {

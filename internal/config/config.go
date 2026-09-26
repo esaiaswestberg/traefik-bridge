@@ -26,11 +26,14 @@ type Master struct {
 	RouteSigningKeyFile   string
 	ProxyCertificateMount string
 	RouteTokenLifetime    time.Duration
+	EnrollmentAddress     string
+	EnrollmentSecretFile  string
 }
 
 // Slave configures the bridge slave runtime.
 type Slave struct {
 	MasterAddress        string
+	EnrollmentAddress    string
 	MasterServerName     string
 	DataAddress          string
 	DataListenAddress    string
@@ -43,6 +46,9 @@ type Slave struct {
 	PrivateKeyFile       string
 	RouteSigningKeyFile  string
 	ConstraintLabels     map[string]string
+	EnrollmentCAFile     string
+	EnrollmentSecretFile string
+	EnrollmentCSRFile    string
 }
 
 // Proxy configures one generated bridge proxy.
@@ -87,6 +93,8 @@ func loadMaster(getenv func(string) string) (Master, error) {
 		RouteSigningKeyFile:   strings.TrimSpace(getenv("BRIDGE_ROUTE_SIGNING_KEY_FILE")),
 		ProxyCertificateMount: strings.TrimSpace(getenv("BRIDGE_PROXY_CERTIFICATE_MOUNT")),
 		RouteTokenLifetime:    5 * time.Minute,
+		EnrollmentAddress:     strings.TrimSpace(getenv("BRIDGE_ENROLLMENT_ADDRESS")),
+		EnrollmentSecretFile:  strings.TrimSpace(getenv("BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE")),
 	}
 	if config.ProxyImage == "" {
 		return Master{}, errors.New("BRIDGE_PROXY_IMAGE is required")
@@ -116,6 +124,7 @@ func loadMaster(getenv func(string) string) (Master, error) {
 func loadSlave(getenv func(string) string) (Slave, error) {
 	config := Slave{
 		MasterAddress:        strings.TrimSpace(getenv("BRIDGE_MASTER_ADDRESS")),
+		EnrollmentAddress:    value(getenv, "BRIDGE_ENROLLMENT_ADDRESS", getenv("BRIDGE_MASTER_ADDRESS")),
 		MasterServerName:     value(getenv, "BRIDGE_MASTER_SERVER_NAME", "bridge-master"),
 		DataAddress:          strings.TrimSpace(getenv("BRIDGE_DATA_ADDRESS")),
 		DataListenAddress:    value(getenv, "BRIDGE_DATA_LISTEN_ADDRESS", getenv("BRIDGE_DATA_ADDRESS")),
@@ -127,6 +136,9 @@ func loadSlave(getenv func(string) string) (Slave, error) {
 		CertificateFile:      strings.TrimSpace(getenv("BRIDGE_CERTIFICATE_FILE")),
 		PrivateKeyFile:       strings.TrimSpace(getenv("BRIDGE_PRIVATE_KEY_FILE")),
 		RouteSigningKeyFile:  strings.TrimSpace(getenv("BRIDGE_ROUTE_SIGNING_KEY_FILE")),
+		EnrollmentCAFile:     strings.TrimSpace(getenv("BRIDGE_ENROLLMENT_CA_FILE")),
+		EnrollmentSecretFile: strings.TrimSpace(getenv("BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE")),
+		EnrollmentCSRFile:    strings.TrimSpace(getenv("BRIDGE_ENROLLMENT_CSR_FILE")),
 	}
 	if config.MasterAddress == "" {
 		return Slave{}, errors.New("BRIDGE_MASTER_ADDRESS is required")
@@ -145,14 +157,23 @@ func loadSlave(getenv func(string) string) (Slave, error) {
 	}
 	for name, path := range map[string]string{
 		"BRIDGE_SLAVE_ID":               config.SlaveID,
-		"BRIDGE_CA_FILE":                config.CAFile,
-		"BRIDGE_CERTIFICATE_FILE":       config.CertificateFile,
-		"BRIDGE_PRIVATE_KEY_FILE":       config.PrivateKeyFile,
 		"BRIDGE_ROUTE_SIGNING_KEY_FILE": config.RouteSigningKeyFile,
 	} {
 		if path == "" {
 			return Slave{}, fmt.Errorf("%s is required", name)
 		}
+	}
+	credentialPaths := []string{config.CAFile, config.CertificateFile, config.PrivateKeyFile}
+	for _, path := range credentialPaths {
+		if path == "" {
+			return Slave{}, errors.New("BRIDGE_CA_FILE, BRIDGE_CERTIFICATE_FILE, and BRIDGE_PRIVATE_KEY_FILE are required")
+		}
+	}
+	if config.EnrollmentSecretFile != "" && config.EnrollmentCAFile == "" {
+		return Slave{}, errors.New("BRIDGE_ENROLLMENT_CA_FILE is required with development enrollment")
+	}
+	if config.EnrollmentSecretFile != "" && config.EnrollmentCSRFile == "" {
+		return Slave{}, errors.New("BRIDGE_ENROLLMENT_CSR_FILE is required with development enrollment")
 	}
 	constraints, err := labels(getenv("BRIDGE_CONSTRAINT_LABELS"))
 	if err != nil {

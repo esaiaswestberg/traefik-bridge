@@ -22,6 +22,17 @@ type State struct {
 	MasterServer KeyPair          `json:"master_server"`
 	MasterClient KeyPair          `json:"master_client"`
 	Slaves       map[string]Slave `json:"slaves"`
+	Enrollment   Enrollment       `json:"enrollment"`
+}
+
+// Enrollment holds opaque server material. None of these fields contain the
+// shared enrollment secret.
+type Enrollment struct {
+	Configuration      []byte `json:"configuration"`
+	ServerKeyMaterial  []byte `json:"server_key_material"`
+	RegistrationRecord []byte `json:"registration_record"`
+	CredentialID       []byte `json:"credential_id"`
+	ClientIdentity     []byte `json:"client_identity"`
 }
 
 // KeyPair stores PEM-encoded certificate and private-key material.

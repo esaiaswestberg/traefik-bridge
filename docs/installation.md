@@ -12,9 +12,15 @@ For a two-host deployment, follow [the Compose example](../examples/two-host/REA
 
 ## Slave credentials
 
-`bridge-slave` only starts with provisioned mTLS and route-signing material. Configure `BRIDGE_SLAVE_ID`, `BRIDGE_CA_FILE`, `BRIDGE_CERTIFICATE_FILE`, `BRIDGE_PRIVATE_KEY_FILE`, and `BRIDGE_ROUTE_SIGNING_KEY_FILE`, along with the master and data addresses and `BRIDGE_DOCKER_NETWORK`. The slave certificate must identify the configured slave ID and be issued by the same CA used by the master.
+`bridge-slave` normally starts with provisioned mTLS and route-signing material. Configure `BRIDGE_SLAVE_ID`, `BRIDGE_CA_FILE`, `BRIDGE_CERTIFICATE_FILE`, `BRIDGE_PRIVATE_KEY_FILE`, and `BRIDGE_ROUTE_SIGNING_KEY_FILE`, along with the master and data addresses and `BRIDGE_DOCKER_NETWORK`. The slave certificate must identify the configured slave ID and be issued by the same CA used by the master.
 
-The certificate, private key, CA, and route-signing key must be delivered by an authenticated deployment workflow and mounted read-only. Enrollment is not implemented: in particular, this project does not accept a shared secret, token, or unauthenticated request to issue a slave certificate until an audited PAKE enrollment flow exists.
+The certificate, private key, CA, and route-signing key should be delivered by an authenticated deployment workflow and mounted read-only.
+
+### Development-only PAKE enrollment
+
+This is not a production provisioning method. It uses the unaudited `github.com/bytemare/opaque` v0.18.0 implementation of RFC 9807 OPAQUE.
+
+On the master, set `BRIDGE_ENROLLMENT_ADDRESS` and `BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE`. On an unprovisioned slave, set `BRIDGE_ENROLLMENT_ADDRESS`, `BRIDGE_ENROLLMENT_CA_FILE`, `BRIDGE_ENROLLMENT_CSR_FILE`, and the same `BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE`. The enrollment CA must trust the master certificate. Use a unique random secret of at least 32 bytes, stored in an owner-only file. The slave generates and persists its private key and CSR locally, completes mutual OPAQUE authentication over server-authenticated TLS, then saves its certificate and CA as owner-only files. It will not enroll if any configured credential file already exists.
 
 ## Offline certificate provisioning
 

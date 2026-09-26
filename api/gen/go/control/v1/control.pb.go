@@ -157,6 +157,7 @@ type EnrollmentRequest struct {
 	PakeMessage     []byte                 `protobuf:"bytes,3,opt,name=pake_message,json=pakeMessage,proto3" json:"pake_message,omitempty"`
 	CsrDer          []byte                 `protobuf:"bytes,4,opt,name=csr_der,json=csrDer,proto3" json:"csr_der,omitempty"`
 	Endpoint        *SlaveEndpoint         `protobuf:"bytes,5,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	SlaveId         string                 `protobuf:"bytes,6,opt,name=slave_id,json=slaveId,proto3" json:"slave_id,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -226,6 +227,13 @@ func (x *EnrollmentRequest) GetEndpoint() *SlaveEndpoint {
 	return nil
 }
 
+func (x *EnrollmentRequest) GetSlaveId() string {
+	if x != nil {
+		return x.SlaveId
+	}
+	return ""
+}
+
 type EnrollmentResponse struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
 	EnrollmentId []byte                 `protobuf:"bytes,1,opt,name=enrollment_id,json=enrollmentId,proto3" json:"enrollment_id,omitempty"`
@@ -234,9 +242,10 @@ type EnrollmentResponse struct {
 	//
 	//	*EnrollmentResponse_Accepted
 	//	*EnrollmentResponse_Rejected
-	Result        isEnrollmentResponse_Result `protobuf_oneof:"result"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Result         isEnrollmentResponse_Result `protobuf_oneof:"result"`
+	ServerIdentity []byte                      `protobuf:"bytes,5,opt,name=server_identity,json=serverIdentity,proto3" json:"server_identity,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *EnrollmentResponse) Reset() {
@@ -304,6 +313,13 @@ func (x *EnrollmentResponse) GetRejected() *EnrollmentRejected {
 		if x, ok := x.Result.(*EnrollmentResponse_Rejected); ok {
 			return x.Rejected
 		}
+	}
+	return nil
+}
+
+func (x *EnrollmentResponse) GetServerIdentity() []byte {
+	if x != nil {
+		return x.ServerIdentity
 	}
 	return nil
 }
@@ -1730,18 +1746,20 @@ var File_control_v1_control_proto protoreflect.FileDescriptor
 
 const file_control_v1_control_proto_rawDesc = "" +
 	"\n" +
-	"\x18control/v1/control.proto\x12\x19traefik.bridge.control.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xe5\x01\n" +
+	"\x18control/v1/control.proto\x12\x19traefik.bridge.control.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x80\x02\n" +
 	"\x11EnrollmentRequest\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\tR\x0fprotocolVersion\x12#\n" +
 	"\renrollment_id\x18\x02 \x01(\fR\fenrollmentId\x12!\n" +
 	"\fpake_message\x18\x03 \x01(\fR\vpakeMessage\x12\x17\n" +
 	"\acsr_der\x18\x04 \x01(\fR\x06csrDer\x12D\n" +
-	"\bendpoint\x18\x05 \x01(\v2(.traefik.bridge.control.v1.SlaveEndpointR\bendpoint\"\x80\x02\n" +
+	"\bendpoint\x18\x05 \x01(\v2(.traefik.bridge.control.v1.SlaveEndpointR\bendpoint\x12\x19\n" +
+	"\bslave_id\x18\x06 \x01(\tR\aslaveId\"\xa9\x02\n" +
 	"\x12EnrollmentResponse\x12#\n" +
 	"\renrollment_id\x18\x01 \x01(\fR\fenrollmentId\x12!\n" +
 	"\fpake_message\x18\x02 \x01(\fR\vpakeMessage\x12K\n" +
 	"\baccepted\x18\x03 \x01(\v2-.traefik.bridge.control.v1.EnrollmentAcceptedH\x00R\baccepted\x12K\n" +
-	"\brejected\x18\x04 \x01(\v2-.traefik.bridge.control.v1.EnrollmentRejectedH\x00R\brejectedB\b\n" +
+	"\brejected\x18\x04 \x01(\v2-.traefik.bridge.control.v1.EnrollmentRejectedH\x00R\brejected\x12'\n" +
+	"\x0fserver_identity\x18\x05 \x01(\fR\x0eserverIdentityB\b\n" +
 	"\x06result\"\xe0\x01\n" +
 	"\x12EnrollmentAccepted\x12\x19\n" +
 	"\bslave_id\x18\x01 \x01(\tR\aslaveId\x12N\n" +

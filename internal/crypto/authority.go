@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bytemare/opaque"
 	"github.com/traefik/traefik-bridge/internal/state"
 )
 
@@ -193,10 +194,110 @@ func (a *Authority) IssueSlave(slaveID string, csrDER []byte) (state.Slave, erro
 	return record, nil
 }
 
-// Enrollment is intentionally not implemented here. It must use an audited
-// PAKE library before IssueSlave is exposed to unauthenticated peers.
-type Enrollment interface {
-	Authenticate() error
+// Enrollment is the persisted OPAQUE server state used by development-only
+// certificate enrollment. It never stores the shared secret.
+type Enrollment struct {
+	configuration *opaque.Configuration
+	server        *opaque.Server
+	record        *opaque.ClientRecord
+}
+
+// InitializeEnrollment loads or creates the OPAQUE record derived locally
+// from secret. The secret is never serialized or sent over the network.
+func (a *Authority) InitializeEnrollment(secret []byte) (*Enrollment, error) {
+	if len(secret) < 32 {
+		return nil, errors.New("development enrollment secret must contain at least 32 bytes")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.state.Enrollment.Configuration) == 0 {
+		if err := a.createEnrollment(secret); err != nil {
+			return nil, err
+		}
+	}
+	configuration, err := opaque.DeserializeConfiguration(a.state.Enrollment.Configuration)
+	if err != nil {
+		return nil, fmt.Errorf("decode OPAQUE configuration: %w", err)
+	}
+	keyMaterial, err := configuration.DecodeServerKeyMaterial(a.state.Enrollment.ServerKeyMaterial)
+	if err != nil {
+		return nil, fmt.Errorf("decode OPAQUE server key material: %w", err)
+	}
+	server, err := configuration.Server()
+	if err != nil {
+		return nil, fmt.Errorf("create OPAQUE server: %w", err)
+	}
+	if err := server.SetKeyMaterial(keyMaterial); err != nil {
+		return nil, fmt.Errorf("set OPAQUE server key material: %w", err)
+	}
+	record, err := server.Deserialize.RegistrationRecord(a.state.Enrollment.RegistrationRecord)
+	if err != nil {
+		return nil, fmt.Errorf("decode OPAQUE registration record: %w", err)
+	}
+	return &Enrollment{configuration: configuration, server: server, record: &opaque.ClientRecord{RegistrationRecord: record, CredentialIdentifier: a.state.Enrollment.CredentialID, ClientIdentity: a.state.Enrollment.ClientIdentity}}, nil
+}
+
+func (a *Authority) createEnrollment(secret []byte) error {
+	configuration := opaque.DefaultConfiguration()
+	server, err := configuration.Server()
+	if err != nil {
+		return fmt.Errorf("create OPAQUE server: %w", err)
+	}
+	privateKey, publicKey := configuration.KeyGen()
+	keyMaterial := &opaque.ServerKeyMaterial{Identity: []byte("traefik-bridge:master:" + a.state.MasterID), PrivateKey: privateKey, PublicKeyBytes: publicKey.Encode(), OPRFGlobalSeed: configuration.GenerateOPRFSeed()}
+	if err := server.SetKeyMaterial(keyMaterial); err != nil {
+		return fmt.Errorf("set OPAQUE server key material: %w", err)
+	}
+	client, err := configuration.Client()
+	if err != nil {
+		return fmt.Errorf("create OPAQUE client: %w", err)
+	}
+	request, err := client.RegistrationInit(secret)
+	if err != nil {
+		return fmt.Errorf("initialize OPAQUE registration: %w", err)
+	}
+	credentialID, err := randomBytes(32)
+	if err != nil {
+		return err
+	}
+	response, err := server.RegistrationResponse(request, credentialID, nil)
+	if err != nil {
+		return fmt.Errorf("create OPAQUE registration response: %w", err)
+	}
+	clientID := []byte("traefik-bridge:cluster")
+	record, _, err := client.RegistrationFinalize(response, clientID, keyMaterial.Identity)
+	if err != nil {
+		return fmt.Errorf("finalize OPAQUE registration: %w", err)
+	}
+	a.state.Enrollment = state.Enrollment{Configuration: configuration.Serialize(), ServerKeyMaterial: keyMaterial.Encode(), RegistrationRecord: record.Serialize(), CredentialID: credentialID, ClientIdentity: clientID}
+	if err := a.store.Save(a.state); err != nil {
+		return fmt.Errorf("persist OPAQUE enrollment state: %w", err)
+	}
+	keyMaterial.Flush()
+	client.ClearState()
+	return nil
+}
+
+// BeginEnrollment processes KE1 and returns KE2 plus state required to verify KE3.
+func (e *Enrollment) BeginEnrollment(message []byte) ([]byte, *opaque.ServerOutput, error) {
+	ke1, err := e.server.Deserialize.KE1(message)
+	if err != nil {
+		return nil, nil, err
+	}
+	ke2, output, err := e.server.GenerateKE2(ke1, e.record)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ke2.Serialize(), output, nil
+}
+
+// FinishEnrollment verifies the client proof.
+func (e *Enrollment) FinishEnrollment(message []byte, output *opaque.ServerOutput) error {
+	ke3, err := e.server.Deserialize.KE3(message)
+	if err != nil {
+		return err
+	}
+	return e.server.LoginFinish(ke3, output.ClientMAC)
 }
 
 func newState() (*state.State, error) {
@@ -295,6 +396,14 @@ func randomSerial() (*big.Int, error) {
 		return nil, fmt.Errorf("generate certificate serial: %w", err)
 	}
 	return serial, nil
+}
+
+func randomBytes(length int) ([]byte, error) {
+	bytes := make([]byte, length)
+	if _, err := rand.Read(bytes); err != nil {
+		return nil, err
+	}
+	return bytes, nil
 }
 
 func writePEM(path string, contents []byte, mode os.FileMode) error {

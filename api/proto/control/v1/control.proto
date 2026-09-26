@@ -22,6 +22,7 @@ message EnrollmentRequest {
   bytes pake_message = 3;
   bytes csr_der = 4;
   SlaveEndpoint endpoint = 5;
+  string slave_id = 6;
 }
 
 message EnrollmentResponse {
@@ -31,6 +32,7 @@ message EnrollmentResponse {
     EnrollmentAccepted accepted = 3;
     EnrollmentRejected rejected = 4;
   }
+  bytes server_identity = 5;
 }
 
 message EnrollmentAccepted {

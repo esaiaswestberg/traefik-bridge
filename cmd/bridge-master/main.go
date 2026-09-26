@@ -91,6 +91,32 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("listen for control connections: %w", err)
 	}
 	defer func() { _ = controlListener.Close() }()
+	var enrollmentListener net.Listener
+	var enrollmentServer *grpc.Server
+	if cfg.EnrollmentSecretFile != "" || cfg.EnrollmentAddress != "" {
+		if cfg.EnrollmentSecretFile == "" || cfg.EnrollmentAddress == "" {
+			return errors.New("BRIDGE_ENROLLMENT_ADDRESS and BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE must be set together")
+		}
+		secret, readErr := os.ReadFile(cfg.EnrollmentSecretFile)
+		if readErr != nil {
+			return fmt.Errorf("read development enrollment secret: %w", readErr)
+		}
+		enrollment, enrollmentErr := bridgecontrol.NewEnrollmentServer(authority, secret)
+		if enrollmentErr != nil {
+			return fmt.Errorf("initialize development enrollment: %w", enrollmentErr)
+		}
+		enrollmentTLS, enrollmentErr := enrollment.TLSConfig()
+		if enrollmentErr != nil {
+			return enrollmentErr
+		}
+		enrollmentListener, enrollmentErr = net.Listen("tcp", cfg.EnrollmentAddress)
+		if enrollmentErr != nil {
+			return fmt.Errorf("listen for enrollment connections: %w", enrollmentErr)
+		}
+		defer func() { _ = enrollmentListener.Close() }()
+		enrollmentServer = grpc.NewServer(grpc.Creds(credentials.NewTLS(enrollmentTLS)))
+		enrollment.Register(enrollmentServer)
+	}
 
 	var ready atomic.Bool
 	operations := &http.Server{Addr: cfg.ObservabilityAddress, Handler: observability.NewHTTPHandler(observability.HTTPConfig{Registry: registry, Ready: ready.Load})}
@@ -102,8 +128,11 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	grpcServer := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConfig)))
 	control.Register(grpcServer)
-	errs := make(chan error, 2)
+	errs := make(chan error, 3)
 	go serve(errs, "control gRPC", func() error { return grpcServer.Serve(controlListener) })
+	if enrollmentServer != nil {
+		go serve(errs, "development enrollment gRPC", func() error { return enrollmentServer.Serve(enrollmentListener) })
+	}
 	go serve(errs, "operational HTTP", func() error { return operations.Serve(operationsListener) })
 	ready.Store(true)
 	logger.Info("bridge-master started", "control_address", cfg.ControlAddress, "observability_address", cfg.ObservabilityAddress)
@@ -121,6 +150,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		logger.Error("shutdown operational HTTP", "error", err)
 	}
 	gracefulStop(grpcServer, shutdownCtx)
+	if enrollmentServer != nil {
+		gracefulStop(enrollmentServer, shutdownCtx)
+	}
 	if serveErr != nil {
 		return serveErr
 	}
