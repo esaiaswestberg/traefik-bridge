@@ -16,6 +16,7 @@ import (
 
 	controlv1 "github.com/traefik/traefik-bridge/api/gen/go/control/v1"
 	"github.com/traefik/traefik-bridge/internal/crypto"
+	"github.com/traefik/traefik-bridge/internal/observability"
 	"github.com/traefik/traefik-bridge/internal/state"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -103,6 +104,7 @@ type ServerConfig struct {
 	EndpointAllowlist EndpointAllowlist
 	DisconnectGrace   time.Duration
 	SnapshotHandler   SnapshotHandler
+	Metrics           observability.Recorder
 }
 
 // SnapshotHandler applies a full snapshot after its control-stream identity
@@ -135,6 +137,7 @@ type Server struct {
 	instance  string
 	grace     time.Duration
 	handler   SnapshotHandler
+	metrics   observability.Recorder
 	mu        sync.Mutex
 	sessions  map[string]session
 	nextID    uint64
@@ -160,7 +163,7 @@ func NewServer(authority *crypto.Authority, config ServerConfig) (*Server, error
 	if err != nil {
 		return nil, err
 	}
-	return &Server{authority: authority, allowlist: allowed, instance: instance, grace: grace, handler: config.SnapshotHandler, sessions: make(map[string]session)}, nil
+	return &Server{authority: authority, allowlist: allowed, instance: instance, grace: grace, handler: config.SnapshotHandler, metrics: config.Metrics, sessions: make(map[string]session)}, nil
 }
 
 // Register registers the control service on registrar.
@@ -250,15 +253,24 @@ func (s *Server) Connect(stream controlv1.ControlService_ConnectServer) error {
 				var applyErr error
 				rejections, applyErr = s.handler.Apply(stream.Context(), hello.GetSlaveId(), snapshot)
 				if applyErr != nil {
+					if s.metrics != nil {
+						s.metrics.Snapshot(false)
+					}
 					return status.Error(codes.Internal, fmt.Sprintf("apply snapshot: %v", applyErr))
 				}
 			}
 			s.acceptSnapshot(hello.GetSlaveId(), snapshot.GetRevision())
 			if len(rejections) > 0 {
+				if s.metrics != nil {
+					s.metrics.Snapshot(false)
+				}
 				if err := stream.Send(&controlv1.MasterToSlave{Payload: &controlv1.MasterToSlave_SnapshotRejected{SnapshotRejected: &controlv1.SnapshotRejected{Revision: snapshot.GetRevision(), SnapshotId: snapshot.GetSnapshotId(), Rejections: rejections}}}); err != nil {
 					return err
 				}
 				continue
+			}
+			if s.metrics != nil {
+				s.metrics.Snapshot(true)
 			}
 			if err := stream.Send(&controlv1.MasterToSlave{Payload: &controlv1.MasterToSlave_SnapshotAccepted{SnapshotAccepted: &controlv1.SnapshotAccepted{Revision: snapshot.GetRevision(), SnapshotId: snapshot.GetSnapshotId()}}}); err != nil {
 				return err
@@ -271,7 +283,11 @@ func (s *Server) connected(id string, endpoint *controlv1.SlaveEndpoint, revisio
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nextID++
+	wasConnected := s.sessions[id].Connected
 	s.sessions[id] = session{SessionStatus: SessionStatus{Connected: true, LastHeartbeat: time.Now(), Revision: revision, Endpoint: cloneEndpoint(endpoint)}, connection: s.nextID}
+	if !wasConnected && s.metrics != nil {
+		s.metrics.Connection(true)
+	}
 	return s.nextID
 }
 
@@ -285,6 +301,9 @@ func (s *Server) disconnected(id string, connectionID uint64) {
 	current.Connected = false
 	current.LastDisconnect = time.Now()
 	s.sessions[id] = current
+	if s.metrics != nil {
+		s.metrics.Connection(false)
+	}
 }
 
 func (s *Server) heartbeat(id string, endpoint *controlv1.SlaveEndpoint, revision uint64) {

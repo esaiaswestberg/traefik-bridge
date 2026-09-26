@@ -16,6 +16,8 @@ import (
 	"net/url"
 	"sync"
 	"time"
+
+	"github.com/traefik/traefik-bridge/internal/observability"
 )
 
 // RouteHeader carries the signed, opaque route identifier between bridge peers.
@@ -122,6 +124,7 @@ type MasterConfig struct {
 	RouteToken string
 	Transport  http.RoundTripper
 	TLSConfig  *tls.Config
+	Metrics    observability.Recorder
 }
 
 // NewMaster returns a handler forwarding requests to one slave over the configured upstream.
@@ -145,6 +148,18 @@ func NewMaster(config MasterConfig) (http.Handler, error) {
 			proxyRequest.SetXForwarded()
 			proxyRequest.Out.Header.Set(RouteHeader, config.RouteToken)
 		},
+		ModifyResponse: func(response *http.Response) error {
+			if config.Metrics != nil {
+				config.Metrics.ProxyRequest("master", response.StatusCode)
+			}
+			return nil
+		},
+		ErrorHandler: func(writer http.ResponseWriter, _ *http.Request, _ error) {
+			if config.Metrics != nil {
+				config.Metrics.ProxyRequest("master", http.StatusBadGateway)
+			}
+			http.Error(writer, "bridge upstream unavailable", http.StatusBadGateway)
+		},
 		FlushInterval: -1,
 	}, nil
 }
@@ -156,6 +171,7 @@ type SlaveConfig struct {
 	Services     map[string][]*url.URL
 	HealthChecks map[string]HealthCheck
 	Transport    http.RoundTripper
+	Metrics      observability.Recorder
 }
 
 // HealthCheck describes a local target health endpoint. Path and Scheme are
@@ -179,6 +195,7 @@ type Slave struct {
 	grace     time.Duration
 	pools     map[string]*targetPool
 	transport http.RoundTripper
+	metrics   observability.Recorder
 	cancel    context.CancelFunc
 }
 
@@ -236,7 +253,14 @@ func NewSlave(config SlaveConfig) (*Slave, error) {
 		checks[service] = check
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	slave := &Slave{signer: config.Signer, grace: config.Grace, pools: pools, transport: config.Transport, cancel: cancel}
+	slave := &Slave{signer: config.Signer, grace: config.Grace, pools: pools, transport: config.Transport, metrics: config.Metrics, cancel: cancel}
+	for service, pool := range pools {
+		for _, target := range pool.targets {
+			if slave.metrics != nil {
+				slave.metrics.TargetHealth(service, target.url.String(), target.healthy)
+			}
+		}
+	}
 	for service, check := range checks {
 		go slave.runHealthChecks(ctx, service, check)
 	}
@@ -247,16 +271,25 @@ func NewSlave(config SlaveConfig) (*Slave, error) {
 func (s *Slave) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	route, err := s.signer.Verify(request.Header.Get(RouteHeader), s.grace)
 	if err != nil {
+		if s.metrics != nil {
+			s.metrics.ProxyRequest("slave", http.StatusForbidden)
+		}
 		http.Error(response, "invalid bridge route", http.StatusForbidden)
 		return
 	}
 	pool := s.pools[route.ServiceID]
 	if pool == nil {
+		if s.metrics != nil {
+			s.metrics.ProxyRequest("slave", http.StatusNotFound)
+		}
 		http.Error(response, "unknown bridge service", http.StatusNotFound)
 		return
 	}
 	target, ok := pool.target(request.Context())
 	if !ok {
+		if s.metrics != nil {
+			s.metrics.ProxyRequest("slave", http.StatusServiceUnavailable)
+		}
 		http.Error(response, "bridge service has no healthy targets", http.StatusServiceUnavailable)
 		return
 	}
@@ -267,6 +300,18 @@ func (s *Slave) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 			proxyRequest.SetURL(target)
 			proxyRequest.Out.Host = proxyRequest.In.Host
 			proxyRequest.SetXForwarded()
+		},
+		ModifyResponse: func(proxyResponse *http.Response) error {
+			if s.metrics != nil {
+				s.metrics.ProxyRequest("slave", proxyResponse.StatusCode)
+			}
+			return nil
+		},
+		ErrorHandler: func(writer http.ResponseWriter, _ *http.Request, _ error) {
+			if s.metrics != nil {
+				s.metrics.ProxyRequest("slave", http.StatusBadGateway)
+			}
+			http.Error(writer, "bridge target unavailable", http.StatusBadGateway)
 		},
 		FlushInterval: -1,
 	}
@@ -378,7 +423,12 @@ func (s *Slave) checkTarget(ctx context.Context, service string, index int, chec
 	s.ServeHTTP(response, request)
 	pool.mu.Lock()
 	pool.targets[index].healthy = response.status >= http.StatusOK && response.status < http.StatusMultipleChoices
+	healthy := pool.targets[index].healthy
+	targetName := pool.targets[index].url.String()
 	pool.mu.Unlock()
+	if s.metrics != nil {
+		s.metrics.TargetHealth(service, targetName, healthy)
+	}
 }
 
 type healthResponseWriter struct {
