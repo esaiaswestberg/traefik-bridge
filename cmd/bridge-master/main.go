@@ -20,6 +20,7 @@ import (
 	bridgecrypto "github.com/traefik/traefik-bridge/internal/crypto"
 	bridgedocker "github.com/traefik/traefik-bridge/internal/docker"
 	"github.com/traefik/traefik-bridge/internal/observability"
+	"github.com/traefik/traefik-bridge/internal/proxy"
 	"github.com/traefik/traefik-bridge/internal/state"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -48,6 +49,18 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err := authority.ExportPEM(cfg.DataDir); err != nil {
 		return fmt.Errorf("export TLS material: %w", err)
 	}
+	routeKey, err := os.ReadFile(cfg.RouteSigningKeyFile)
+	if err != nil {
+		return fmt.Errorf("read route signing key: %w", err)
+	}
+	signer, err := proxy.NewSigner(routeKey)
+	if err != nil {
+		return fmt.Errorf("initialize route signer: %w", err)
+	}
+	certificateMount, err := bridgedocker.ParseMount(cfg.ProxyCertificateMount)
+	if err != nil {
+		return fmt.Errorf("parse proxy certificate mount: %w", err)
+	}
 	registry := prometheus.NewRegistry()
 	metrics, err := observability.NewMetrics(registry)
 	if err != nil {
@@ -57,7 +70,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	reconciler, err := bridgedocker.NewReconciler(docker, bridgedocker.ReconcileConfig{MasterID: authority.MasterID(), ProxyImage: cfg.ProxyImage, PortStart: cfg.ProxyPortStart, PortEnd: cfg.ProxyPortEnd})
+	reconciler, err := bridgedocker.NewReconciler(docker, bridgedocker.ReconcileConfig{MasterID: authority.MasterID(), ProxyImage: cfg.ProxyImage, PortStart: cfg.ProxyPortStart, PortEnd: cfg.ProxyPortEnd, Signer: signer, RouteTokenLifetime: cfg.RouteTokenLifetime, CertificateMount: certificateMount})
 	if err != nil {
 		return fmt.Errorf("initialize Docker reconciler: %w", err)
 	}

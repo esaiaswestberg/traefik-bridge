@@ -118,7 +118,7 @@ func TestClientPublishesQueuedSnapshots(t *testing.T) {
 	var revision atomic.Uint64
 	server, dial := startServer(t, authority, ServerConfig{
 		EndpointAllowlist: EndpointAllowlist{DNSNames: []string{"node.example"}},
-		SnapshotHandler: snapshotHandler(func(_ context.Context, _ string, snapshot *controlv1.FullSnapshot) ([]*controlv1.ResourceRejection, error) {
+		SnapshotHandler: snapshotHandler(func(_ context.Context, _ string, _ *controlv1.SlaveEndpoint, snapshot *controlv1.FullSnapshot) ([]*controlv1.ResourceRejection, error) {
 			revision.Store(snapshot.GetRevision())
 			return nil, nil
 		}),
@@ -145,10 +145,10 @@ func TestClientPublishesQueuedSnapshots(t *testing.T) {
 	}
 }
 
-type snapshotHandler func(context.Context, string, *controlv1.FullSnapshot) ([]*controlv1.ResourceRejection, error)
+type snapshotHandler func(context.Context, string, *controlv1.SlaveEndpoint, *controlv1.FullSnapshot) ([]*controlv1.ResourceRejection, error)
 
-func (f snapshotHandler) Apply(ctx context.Context, slaveID string, snapshot *controlv1.FullSnapshot) ([]*controlv1.ResourceRejection, error) {
-	return f(ctx, slaveID, snapshot)
+func (f snapshotHandler) Apply(ctx context.Context, slaveID string, endpoint *controlv1.SlaveEndpoint, snapshot *controlv1.FullSnapshot) ([]*controlv1.ResourceRejection, error) {
+	return f(ctx, slaveID, endpoint, snapshot)
 }
 
 func newAuthority(t *testing.T) *bridgecrypto.Authority {

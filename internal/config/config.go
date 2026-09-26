@@ -7,21 +7,25 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const defaultDockerHost = "unix:///var/run/docker.sock"
 
 // Master configures the bridge master runtime.
 type Master struct {
-	DataDir              string
-	ProxyImage           string
-	DockerHost           string
-	ControlAddress       string
-	ObservabilityAddress string
-	EndpointCIDRs        []string
-	EndpointDNSNames     []string
-	ProxyPortStart       uint32
-	ProxyPortEnd         uint32
+	DataDir               string
+	ProxyImage            string
+	DockerHost            string
+	ControlAddress        string
+	ObservabilityAddress  string
+	EndpointCIDRs         []string
+	EndpointDNSNames      []string
+	ProxyPortStart        uint32
+	ProxyPortEnd          uint32
+	RouteSigningKeyFile   string
+	ProxyCertificateMount string
+	RouteTokenLifetime    time.Duration
 }
 
 // Slave configures the bridge slave runtime.
@@ -42,7 +46,15 @@ type Slave struct {
 
 // Proxy configures one generated bridge proxy.
 type Proxy struct {
-	ListenerPorts map[string]uint16
+	ListenerPorts   map[string]uint16
+	Upstream        string
+	RouteTokens     map[string]string
+	RouteIDs        map[string]string
+	RouteExpiries   map[string]string
+	CAFile          string
+	CertificateFile string
+	PrivateKeyFile  string
+	ServerName      string
 }
 
 // LoadMaster loads a complete master configuration from BRIDGE_* variables.
@@ -62,20 +74,32 @@ func LoadProxy() (Proxy, error) {
 
 func loadMaster(getenv func(string) string) (Master, error) {
 	config := Master{
-		DataDir:              value(getenv, "BRIDGE_DATA_DIR", "/bridge"),
-		ProxyImage:           strings.TrimSpace(getenv("BRIDGE_PROXY_IMAGE")),
-		DockerHost:           value(getenv, "BRIDGE_DOCKER_HOST", defaultDockerHost),
-		ControlAddress:       value(getenv, "BRIDGE_CONTROL_ADDRESS", ":8443"),
-		ObservabilityAddress: value(getenv, "BRIDGE_OBSERVABILITY_ADDRESS", ":8080"),
-		EndpointCIDRs:        list(getenv("BRIDGE_ENDPOINT_CIDRS")),
-		EndpointDNSNames:     list(getenv("BRIDGE_ENDPOINT_DNS_NAMES")),
-		ProxyPortStart:       20000,
-		ProxyPortEnd:         29999,
+		DataDir:               value(getenv, "BRIDGE_DATA_DIR", "/bridge"),
+		ProxyImage:            strings.TrimSpace(getenv("BRIDGE_PROXY_IMAGE")),
+		DockerHost:            value(getenv, "BRIDGE_DOCKER_HOST", defaultDockerHost),
+		ControlAddress:        value(getenv, "BRIDGE_CONTROL_ADDRESS", ":8443"),
+		ObservabilityAddress:  value(getenv, "BRIDGE_OBSERVABILITY_ADDRESS", ":8080"),
+		EndpointCIDRs:         list(getenv("BRIDGE_ENDPOINT_CIDRS")),
+		EndpointDNSNames:      list(getenv("BRIDGE_ENDPOINT_DNS_NAMES")),
+		ProxyPortStart:        20000,
+		ProxyPortEnd:          29999,
+		RouteSigningKeyFile:   strings.TrimSpace(getenv("BRIDGE_ROUTE_SIGNING_KEY_FILE")),
+		ProxyCertificateMount: strings.TrimSpace(getenv("BRIDGE_PROXY_CERTIFICATE_MOUNT")),
+		RouteTokenLifetime:    5 * time.Minute,
 	}
 	if config.ProxyImage == "" {
 		return Master{}, errors.New("BRIDGE_PROXY_IMAGE is required")
 	}
+	if config.RouteSigningKeyFile == "" {
+		return Master{}, errors.New("BRIDGE_ROUTE_SIGNING_KEY_FILE is required")
+	}
+	if config.ProxyCertificateMount == "" || !strings.Contains(config.ProxyCertificateMount, ":") {
+		return Master{}, errors.New("BRIDGE_PROXY_CERTIFICATE_MOUNT must be a source:target mount")
+	}
 	var err error
+	if config.RouteTokenLifetime, err = duration(getenv, "BRIDGE_ROUTE_TOKEN_LIFETIME", config.RouteTokenLifetime); err != nil {
+		return Master{}, err
+	}
 	if config.ProxyPortStart, err = port(getenv, "BRIDGE_PROXY_PORT_START", config.ProxyPortStart); err != nil {
 		return Master{}, err
 	}
@@ -135,7 +159,33 @@ func loadProxy(getenv func(string) string) (Proxy, error) {
 	if err != nil {
 		return Proxy{}, err
 	}
-	return Proxy{ListenerPorts: ports}, nil
+	tokens, err := stringMap(getenv("BRIDGE_ROUTE_TOKENS"), "BRIDGE_ROUTE_TOKENS")
+	if err != nil {
+		return Proxy{}, err
+	}
+	routeIDs, err := stringMap(getenv("BRIDGE_ROUTE_IDS"), "BRIDGE_ROUTE_IDS")
+	if err != nil {
+		return Proxy{}, err
+	}
+	routeExpiries, err := stringMap(getenv("BRIDGE_ROUTE_EXPIRIES"), "BRIDGE_ROUTE_EXPIRIES")
+	if err != nil {
+		return Proxy{}, err
+	}
+	config := Proxy{ListenerPorts: ports, Upstream: strings.TrimSpace(getenv("BRIDGE_UPSTREAM")), RouteTokens: tokens, RouteIDs: routeIDs, RouteExpiries: routeExpiries, CAFile: strings.TrimSpace(getenv("BRIDGE_CA_FILE")), CertificateFile: strings.TrimSpace(getenv("BRIDGE_CERTIFICATE_FILE")), PrivateKeyFile: strings.TrimSpace(getenv("BRIDGE_PRIVATE_KEY_FILE")), ServerName: strings.TrimSpace(getenv("BRIDGE_UPSTREAM_SERVER_NAME"))}
+	for name, value := range map[string]string{"BRIDGE_UPSTREAM": config.Upstream, "BRIDGE_CA_FILE": config.CAFile, "BRIDGE_CERTIFICATE_FILE": config.CertificateFile, "BRIDGE_PRIVATE_KEY_FILE": config.PrivateKeyFile} {
+		if value == "" {
+			return Proxy{}, fmt.Errorf("%s is required", name)
+		}
+	}
+	for service := range config.ListenerPorts {
+		if config.RouteTokens[service] == "" || config.RouteIDs[service] == "" || config.RouteExpiries[service] == "" {
+			return Proxy{}, fmt.Errorf("route configuration is missing service %q", service)
+		}
+		if _, err := time.Parse(time.RFC3339, config.RouteExpiries[service]); err != nil {
+			return Proxy{}, fmt.Errorf("route expiry for service %q is invalid", service)
+		}
+	}
+	return config, nil
 }
 
 func value(getenv func(string) string, name, fallback string) string {
@@ -167,7 +217,23 @@ func port(getenv func(string) string, name string, fallback uint32) (uint32, err
 	return uint32(parsed), nil
 }
 
+func duration(getenv func(string) string, name string, fallback time.Duration) (time.Duration, error) {
+	value := strings.TrimSpace(getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("%s must be a positive duration", name)
+	}
+	return parsed, nil
+}
+
 func labels(value string) (map[string]string, error) {
+	return stringMap(value, "BRIDGE_CONSTRAINT_LABELS")
+}
+
+func stringMap(value, name string) (map[string]string, error) {
 	result := make(map[string]string)
 	if strings.TrimSpace(value) == "" {
 		return result, nil
@@ -176,10 +242,10 @@ func labels(value string) (map[string]string, error) {
 		key, expected, ok := strings.Cut(pair, "=")
 		key, expected = strings.TrimSpace(key), strings.TrimSpace(expected)
 		if !ok || key == "" || expected == "" {
-			return nil, errors.New("BRIDGE_CONSTRAINT_LABELS must contain comma-separated key=value pairs")
+			return nil, fmt.Errorf("%s must contain comma-separated key=value pairs", name)
 		}
 		if _, exists := result[key]; exists {
-			return nil, fmt.Errorf("BRIDGE_CONSTRAINT_LABELS contains duplicate key %q", key)
+			return nil, fmt.Errorf("%s contains duplicate key %q", name, key)
 		}
 		result[key] = expected
 	}

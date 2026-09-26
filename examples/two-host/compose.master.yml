@@ -21,13 +21,16 @@ services:
       dockerfile: deploy/docker/Dockerfile.master
     image: traefik-bridge-master:local
     environment:
-      BRIDGE_CLUSTER_SECRET:
       BRIDGE_DATA_DIR: /bridge
       BRIDGE_PROXY_IMAGE: traefik-bridge-proxy:local
+      BRIDGE_ROUTE_SIGNING_KEY_FILE: /run/secrets/route.key
+      BRIDGE_PROXY_CERTIFICATE_MOUNT: bridge-master-data:/bridge
     volumes:
       # Docker socket access lets master control containers on this host.
       - /var/run/docker.sock:/var/run/docker.sock
       - bridge-master-data:/bridge
+    secrets:
+      - route.key
 
   bridge-proxy-image:
     profiles: [image-build]
@@ -38,3 +41,7 @@ services:
 
 volumes:
   bridge-master-data:
+
+secrets:
+  route.key:
+    file: ./route.key

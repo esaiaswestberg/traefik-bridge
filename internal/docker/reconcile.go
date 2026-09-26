@@ -9,9 +9,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	controlv1 "github.com/traefik/traefik-bridge/api/gen/go/control/v1"
 	"github.com/traefik/traefik-bridge/internal/labels"
+	"github.com/traefik/traefik-bridge/internal/proxy"
 )
 
 const (
@@ -32,6 +34,19 @@ type ContainerSpec struct {
 	Name, Image, Network string
 	Labels               map[string]string
 	Env                  []string
+	Mounts               []Mount
+}
+
+// Mount describes a read-only host bind or named-volume mount.
+type Mount struct{ Source, Target string }
+
+// ParseMount parses a Docker volume or absolute bind source and container target.
+func ParseMount(value string) (Mount, error) {
+	source, target, ok := strings.Cut(value, ":")
+	if !ok || strings.TrimSpace(source) == "" || strings.TrimSpace(target) == "" || !strings.HasPrefix(strings.TrimSpace(target), "/") {
+		return Mount{}, errors.New("certificate mount must be source:target")
+	}
+	return Mount{Source: strings.TrimSpace(source), Target: strings.TrimRight(strings.TrimSpace(target), "/")}, nil
 }
 
 // ReconcileClient intentionally excludes all Docker operations not needed here.
@@ -43,17 +58,21 @@ type ReconcileClient interface {
 type ReconcileConfig struct {
 	MasterID, ProxyImage string
 	PortStart, PortEnd   uint32
+	Signer               *proxy.Signer
+	RouteTokenLifetime   time.Duration
+	CertificateMount     Mount
 }
 type Reconciler struct {
 	client    ReconcileClient
 	config    ReconcileConfig
 	snapshots map[string][]labels.Application
+	endpoints map[string]*controlv1.SlaveEndpoint
 	versions  map[string]uint64
 }
 
 func NewReconciler(client ReconcileClient, config ReconcileConfig) (*Reconciler, error) {
-	if client == nil || config.MasterID == "" || config.ProxyImage == "" {
-		return nil, errors.New("docker client, master ID, and proxy image are required")
+	if client == nil || config.MasterID == "" || config.ProxyImage == "" || config.Signer == nil || config.CertificateMount.Source == "" || config.CertificateMount.Target == "" {
+		return nil, errors.New("docker client, master ID, proxy image, signer, and certificate mount are required")
 	}
 	if config.PortStart == 0 {
 		config.PortStart = 20000
@@ -64,14 +83,23 @@ func NewReconciler(client ReconcileClient, config ReconcileConfig) (*Reconciler,
 	if config.PortEnd < config.PortStart {
 		return nil, errors.New("invalid proxy port range")
 	}
-	return &Reconciler{client: client, config: config, snapshots: make(map[string][]labels.Application), versions: make(map[string]uint64)}, nil
+	if config.RouteTokenLifetime == 0 {
+		config.RouteTokenLifetime = 5 * time.Minute
+	}
+	if config.RouteTokenLifetime < 0 {
+		return nil, errors.New("route token lifetime must not be negative")
+	}
+	return &Reconciler{client: client, config: config, snapshots: make(map[string][]labels.Application), endpoints: make(map[string]*controlv1.SlaveEndpoint), versions: make(map[string]uint64)}, nil
 }
 
 // Apply validates one full slave snapshot, reconciles every valid application,
 // and returns invalid resources without withdrawing other valid applications.
-func (r *Reconciler) Apply(ctx context.Context, slaveID string, snapshot *controlv1.FullSnapshot) ([]*controlv1.ResourceRejection, error) {
+func (r *Reconciler) Apply(ctx context.Context, slaveID string, endpoint *controlv1.SlaveEndpoint, snapshot *controlv1.FullSnapshot) ([]*controlv1.ResourceRejection, error) {
 	if slaveID == "" {
 		return nil, errors.New("slave ID is required")
+	}
+	if endpoint == nil || endpoint.GetHost() == "" || endpoint.GetPort() == 0 {
+		return nil, errors.New("slave endpoint is required")
 	}
 	occupied := make(map[string]string)
 	for owner, applications := range r.snapshots {
@@ -85,6 +113,7 @@ func (r *Reconciler) Apply(ctx context.Context, slaveID string, snapshot *contro
 	}
 	applications, rejected := labels.Validate(slaveID, snapshot, occupied)
 	r.snapshots[slaveID] = applications
+	r.endpoints[slaveID] = &controlv1.SlaveEndpoint{Host: endpoint.GetHost(), Port: endpoint.GetPort()}
 	r.versions[slaveID] = snapshot.GetRevision()
 	if err := r.reconcile(ctx); err != nil {
 		return rejected, err
@@ -94,15 +123,16 @@ func (r *Reconciler) Apply(ctx context.Context, slaveID string, snapshot *contro
 
 func (r *Reconciler) reconcile(ctx context.Context) error {
 	type desired struct {
-		slave string
-		app   labels.Application
-		ports map[string]uint32
-		spec  ContainerSpec
+		slave    string
+		app      labels.Application
+		ports    map[string]uint32
+		spec     ContainerSpec
+		endpoint *controlv1.SlaveEndpoint
 	}
 	all := make([]desired, 0)
 	for slave, applications := range r.snapshots {
 		for _, application := range applications {
-			all = append(all, desired{slave: slave, app: application, ports: make(map[string]uint32)})
+			all = append(all, desired{slave: slave, app: application, ports: make(map[string]uint32), endpoint: r.endpoints[slave]})
 		}
 	}
 	sort.Slice(all, func(i, j int) bool {
@@ -130,7 +160,11 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 		name := containerName(all[i].slave, app.GetApplicationId())
 		containerLabels := labels.RewriteBackendPorts(app, all[i].ports)
 		containerLabels[ownerLabel], containerLabels[masterLabel], containerLabels[slaveLabel], containerLabels[applicationLabel], containerLabels[resourceLabel], containerLabels[versionLabel] = "true", r.config.MasterID, all[i].slave, app.GetApplicationId(), app.GetApplicationId(), strconv.FormatUint(r.versions[all[i].slave], 10)
-		all[i].spec = ContainerSpec{Name: name, Image: r.config.ProxyImage, Network: app.GetNetwork(), Labels: containerLabels, Env: listenerEnvironment(all[i].ports)}
+		env, err := r.listenerEnvironment(all[i].slave, app.GetApplicationId(), all[i].ports, all[i].endpoint)
+		if err != nil {
+			return err
+		}
+		all[i].spec = ContainerSpec{Name: name, Image: r.config.ProxyImage, Network: app.GetNetwork(), Labels: containerLabels, Env: env, Mounts: []Mount{r.config.CertificateMount}}
 		desiredByName[name] = all[i].spec
 	}
 	existing, err := r.client.ListManaged(ctx)
@@ -201,7 +235,7 @@ func sameLabels(a, b map[string]string) bool {
 	}
 	return true
 }
-func listenerEnvironment(ports map[string]uint32) []string {
+func (r *Reconciler) listenerEnvironment(slave, application string, ports map[string]uint32, endpoint *controlv1.SlaveEndpoint) ([]string, error) {
 	services := make([]string, 0, len(ports))
 	for service := range ports {
 		services = append(services, service)
@@ -211,5 +245,22 @@ func listenerEnvironment(ports map[string]uint32) []string {
 	for _, service := range services {
 		values = append(values, service+"="+strconv.FormatUint(uint64(ports[service]), 10))
 	}
-	return []string{"BRIDGE_LISTENER_PORTS=" + strings.Join(values, ",")}
+	upstream := "https://" + endpoint.GetHost() + ":" + strconv.FormatUint(uint64(endpoint.GetPort()), 10)
+	env := []string{"BRIDGE_UPSTREAM=" + upstream, "BRIDGE_UPSTREAM_SERVER_NAME=" + endpoint.GetHost(), "BRIDGE_LISTENER_PORTS=" + strings.Join(values, ","), "BRIDGE_CA_FILE=" + r.config.CertificateMount.Target + "/ca.crt", "BRIDGE_CERTIFICATE_FILE=" + r.config.CertificateMount.Target + "/master-client.crt", "BRIDGE_PRIVATE_KEY_FILE=" + r.config.CertificateMount.Target + "/master-client.key"}
+	tokens := make([]string, 0, len(services))
+	routeIDs := make([]string, 0, len(services))
+	expiries := make([]string, 0, len(services))
+	for _, service := range services {
+		routeID := identity(slave, application) + "/" + service
+		expires := time.Now().Add(r.config.RouteTokenLifetime).UTC()
+		token, err := r.config.Signer.Sign(proxy.Route{RouteID: routeID, ServiceID: service, ExpiresAt: expires})
+		if err != nil {
+			return nil, fmt.Errorf("sign route %q: %w", routeID, err)
+		}
+		tokens = append(tokens, service+"="+token)
+		routeIDs = append(routeIDs, service+"="+routeID)
+		expiries = append(expiries, service+"="+expires.Format(time.RFC3339))
+	}
+	env = append(env, "BRIDGE_ROUTE_TOKENS="+strings.Join(tokens, ","), "BRIDGE_ROUTE_IDS="+strings.Join(routeIDs, ","), "BRIDGE_ROUTE_EXPIRIES="+strings.Join(expiries, ","))
+	return env, nil
 }

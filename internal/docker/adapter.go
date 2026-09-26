@@ -3,10 +3,12 @@ package docker
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -122,7 +124,15 @@ func (a *Adapter) ListManaged(ctx context.Context) ([]ManagedContainer, error) {
 
 // CreateManaged creates and starts one proxy attached solely to its requested network.
 func (a *Adapter) CreateManaged(ctx context.Context, spec ContainerSpec) error {
-	response, err := a.client.ContainerCreate(ctx, &container.Config{Image: spec.Image, Labels: cloneLabels(spec.Labels), Env: append([]string(nil), spec.Env...)}, &container.HostConfig{}, &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{spec.Network: {}}}, nil, spec.Name)
+	mounts := make([]mount.Mount, 0, len(spec.Mounts))
+	for _, specMount := range spec.Mounts {
+		type_ := mount.TypeVolume
+		if filepath.IsAbs(specMount.Source) {
+			type_ = mount.TypeBind
+		}
+		mounts = append(mounts, mount.Mount{Type: type_, Source: specMount.Source, Target: specMount.Target, ReadOnly: true})
+	}
+	response, err := a.client.ContainerCreate(ctx, &container.Config{Image: spec.Image, Labels: cloneLabels(spec.Labels), Env: append([]string(nil), spec.Env...)}, &container.HostConfig{Mounts: mounts}, &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{spec.Network: {}}}, nil, spec.Name)
 	if err != nil {
 		return err
 	}

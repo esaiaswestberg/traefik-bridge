@@ -111,7 +111,7 @@ type ServerConfig struct {
 // has been authenticated. It may reject individual resources while accepting
 // the valid remainder.
 type SnapshotHandler interface {
-	Apply(context.Context, string, *controlv1.FullSnapshot) ([]*controlv1.ResourceRejection, error)
+	Apply(context.Context, string, *controlv1.SlaveEndpoint, *controlv1.FullSnapshot) ([]*controlv1.ResourceRejection, error)
 }
 
 // SessionStatus is the observed state of one slave control stream.
@@ -251,7 +251,7 @@ func (s *Server) Connect(stream controlv1.ControlService_ConnectServer) error {
 			var rejections []*controlv1.ResourceRejection
 			if s.handler != nil {
 				var applyErr error
-				rejections, applyErr = s.handler.Apply(stream.Context(), hello.GetSlaveId(), snapshot)
+				rejections, applyErr = s.handler.Apply(stream.Context(), hello.GetSlaveId(), s.endpoint(hello.GetSlaveId()), snapshot)
 				if applyErr != nil {
 					if s.metrics != nil {
 						s.metrics.Snapshot(false)
@@ -277,6 +277,12 @@ func (s *Server) Connect(stream controlv1.ControlService_ConnectServer) error {
 			}
 		}
 	}
+}
+
+func (s *Server) endpoint(id string) *controlv1.SlaveEndpoint {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneEndpoint(s.sessions[id].Endpoint)
 }
 
 func (s *Server) connected(id string, endpoint *controlv1.SlaveEndpoint, revision uint64) uint64 {
