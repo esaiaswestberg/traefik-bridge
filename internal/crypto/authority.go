@@ -66,6 +66,18 @@ func (a *Authority) MasterServer() state.KeyPair { return a.state.MasterServer }
 // MasterClient returns the PEM certificate and key for master-to-slave TLS.
 func (a *Authority) MasterClient() state.KeyPair { return a.state.MasterClient }
 
+// MatchesSlave reports whether cert is the currently issued certificate for
+// slaveID. TLS verification is performed by the caller.
+func (a *Authority) MatchesSlave(slaveID string, cert *x509.Certificate) bool {
+	if cert == nil || cert.Subject.CommonName != "bridge-slave:"+slaveID {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	record, ok := a.state.Slaves[slaveID]
+	return ok && record.Serial == cert.SerialNumber.Text(16)
+}
+
 // CACertificate returns the PEM-encoded bridge CA certificate.
 func (a *Authority) CACertificate() []byte { return append([]byte(nil), a.state.CA.CertificatePEM...) }
 
@@ -139,18 +151,18 @@ func newState() (*state.State, error) {
 		return nil, fmt.Errorf("create CA certificate: %w", err)
 	}
 	ca := state.KeyPair{CertificatePEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), PrivateKeyPEM: encodeKey(caKey)}
-	server, err := issueIdentity(caTemplate, caKey, "bridge-master-server", []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
+	server, err := issueIdentity(caTemplate, caKey, "bridge-master-server", []string{"bridge-master"}, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
 	if err != nil {
 		return nil, err
 	}
-	client, err := issueIdentity(caTemplate, caKey, "bridge-master-client", []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth})
+	client, err := issueIdentity(caTemplate, caKey, "bridge-master-client", nil, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth})
 	if err != nil {
 		return nil, err
 	}
 	return &state.State{Version: stateVersion, MasterID: masterID, CA: ca, MasterServer: server, MasterClient: client, Slaves: make(map[string]state.Slave)}, nil
 }
 
-func issueIdentity(ca *x509.Certificate, caKey *ecdsa.PrivateKey, commonName string, usages []x509.ExtKeyUsage) (state.KeyPair, error) {
+func issueIdentity(ca *x509.Certificate, caKey *ecdsa.PrivateKey, commonName string, dnsNames []string, usages []x509.ExtKeyUsage) (state.KeyPair, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return state.KeyPair{}, err
@@ -160,7 +172,7 @@ func issueIdentity(ca *x509.Certificate, caKey *ecdsa.PrivateKey, commonName str
 		return state.KeyPair{}, err
 	}
 	now := time.Now().UTC()
-	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: commonName}, NotBefore: now.Add(-5 * time.Minute), NotAfter: now.Add(leafLifetime), KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, ExtKeyUsage: usages, BasicConstraintsValid: true}
+	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: commonName}, DNSNames: dnsNames, NotBefore: now.Add(-5 * time.Minute), NotAfter: now.Add(leafLifetime), KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, ExtKeyUsage: usages, BasicConstraintsValid: true}
 	der, err := x509.CreateCertificate(rand.Reader, template, ca, &key.PublicKey, caKey)
 	if err != nil {
 		return state.KeyPair{}, fmt.Errorf("create %s certificate: %w", commonName, err)
