@@ -26,11 +26,18 @@ type Master struct {
 
 // Slave configures the bridge slave runtime.
 type Slave struct {
-	MasterAddress    string
-	DataAddress      string
-	DockerHost       string
-	DefaultNetwork   string
-	ConstraintLabels map[string]string
+	MasterAddress        string
+	MasterServerName     string
+	DataAddress          string
+	ObservabilityAddress string
+	DockerHost           string
+	DefaultNetwork       string
+	SlaveID              string
+	CAFile               string
+	CertificateFile      string
+	PrivateKeyFile       string
+	RouteSigningKeyFile  string
+	ConstraintLabels     map[string]string
 }
 
 // Proxy configures one generated bridge proxy.
@@ -83,10 +90,17 @@ func loadMaster(getenv func(string) string) (Master, error) {
 
 func loadSlave(getenv func(string) string) (Slave, error) {
 	config := Slave{
-		MasterAddress:  strings.TrimSpace(getenv("BRIDGE_MASTER_ADDRESS")),
-		DataAddress:    strings.TrimSpace(getenv("BRIDGE_DATA_ADDRESS")),
-		DockerHost:     value(getenv, "BRIDGE_DOCKER_HOST", defaultDockerHost),
-		DefaultNetwork: strings.TrimSpace(getenv("BRIDGE_DOCKER_NETWORK")),
+		MasterAddress:        strings.TrimSpace(getenv("BRIDGE_MASTER_ADDRESS")),
+		MasterServerName:     value(getenv, "BRIDGE_MASTER_SERVER_NAME", "bridge-master"),
+		DataAddress:          strings.TrimSpace(getenv("BRIDGE_DATA_ADDRESS")),
+		ObservabilityAddress: value(getenv, "BRIDGE_OBSERVABILITY_ADDRESS", ":8080"),
+		DockerHost:           value(getenv, "BRIDGE_DOCKER_HOST", defaultDockerHost),
+		DefaultNetwork:       strings.TrimSpace(getenv("BRIDGE_DOCKER_NETWORK")),
+		SlaveID:              strings.TrimSpace(getenv("BRIDGE_SLAVE_ID")),
+		CAFile:               strings.TrimSpace(getenv("BRIDGE_CA_FILE")),
+		CertificateFile:      strings.TrimSpace(getenv("BRIDGE_CERTIFICATE_FILE")),
+		PrivateKeyFile:       strings.TrimSpace(getenv("BRIDGE_PRIVATE_KEY_FILE")),
+		RouteSigningKeyFile:  strings.TrimSpace(getenv("BRIDGE_ROUTE_SIGNING_KEY_FILE")),
 	}
 	if config.MasterAddress == "" {
 		return Slave{}, errors.New("BRIDGE_MASTER_ADDRESS is required")
@@ -96,6 +110,17 @@ func loadSlave(getenv func(string) string) (Slave, error) {
 	}
 	if config.DefaultNetwork == "" {
 		return Slave{}, errors.New("BRIDGE_DOCKER_NETWORK is required")
+	}
+	for name, path := range map[string]string{
+		"BRIDGE_SLAVE_ID":               config.SlaveID,
+		"BRIDGE_CA_FILE":                config.CAFile,
+		"BRIDGE_CERTIFICATE_FILE":       config.CertificateFile,
+		"BRIDGE_PRIVATE_KEY_FILE":       config.PrivateKeyFile,
+		"BRIDGE_ROUTE_SIGNING_KEY_FILE": config.RouteSigningKeyFile,
+	} {
+		if path == "" {
+			return Slave{}, fmt.Errorf("%s is required", name)
+		}
 	}
 	constraints, err := labels(getenv("BRIDGE_CONSTRAINT_LABELS"))
 	if err != nil {

@@ -367,13 +367,19 @@ type ClientConfig struct {
 	ReconnectDelay    time.Duration
 	Snapshot          func(context.Context) (*controlv1.FullSnapshot, error)
 	Dial              func(context.Context) (*grpc.ClientConn, error)
+	Metrics           observability.Recorder
 }
 
 // Client maintains a control stream until its context is cancelled.
 type Client struct {
-	config   ClientConfig
-	instance string
-	revision uint64
+	config         ClientConfig
+	mu             sync.Mutex
+	instance       string
+	revision       uint64
+	pending        *controlv1.FullSnapshot
+	generation     uint64
+	sentGeneration uint64
+	publish        chan struct{}
 }
 
 // NewClient validates client configuration. Dial is injected so callers can
@@ -388,7 +394,24 @@ func NewClient(config ClientConfig) (*Client, error) {
 	if config.ReconnectDelay == 0 {
 		config.ReconnectDelay = time.Second
 	}
-	return &Client{config: config}, nil
+	return &Client{config: config, publish: make(chan struct{}, 1)}, nil
+}
+
+// PublishSnapshot queues the latest complete discovery snapshot. Publishing is
+// serialized by the control stream and resumes after reconnecting.
+func (c *Client) PublishSnapshot(_ context.Context, snapshot *controlv1.FullSnapshot) error {
+	if snapshot == nil {
+		return errors.New("snapshot is required")
+	}
+	c.mu.Lock()
+	c.pending = snapshot
+	c.generation++
+	c.mu.Unlock()
+	select {
+	case c.publish <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 // TLSConfig returns an mTLS client configuration for a master control listener.
@@ -448,6 +471,12 @@ func (c *Client) runStream(ctx context.Context, connection *grpc.ClientConn) err
 	}()
 	ticker := time.NewTicker(c.config.HeartbeatInterval)
 	defer ticker.Stop()
+	connected := false
+	defer func() {
+		if connected && c.config.Metrics != nil {
+			c.config.Metrics.Connection(false)
+		}
+	}()
 	var sequence uint64
 	resynced := false
 	for {
@@ -457,7 +486,11 @@ func (c *Client) runStream(ctx context.Context, connection *grpc.ClientConn) err
 		case message := <-received:
 			if accepted := message.GetAccepted(); accepted != nil {
 				c.instance = accepted.GetMasterInstanceId()
-				if accepted.GetSnapshotRequired() && !resynced {
+				if !connected && c.config.Metrics != nil {
+					c.config.Metrics.Connection(true)
+					connected = true
+				}
+				if (accepted.GetSnapshotRequired() || c.hasPending()) && !resynced {
 					if err := c.sendSnapshot(ctx, stream); err != nil {
 						return err
 					}
@@ -472,6 +505,18 @@ func (c *Client) runStream(ctx context.Context, connection *grpc.ClientConn) err
 			}
 			if accepted := message.GetSnapshotAccepted(); accepted != nil {
 				c.revision = accepted.GetRevision()
+				if c.config.Metrics != nil {
+					c.config.Metrics.Snapshot(true)
+				}
+			}
+			if message.GetSnapshotRejected() != nil && c.config.Metrics != nil {
+				c.config.Metrics.Snapshot(false)
+			}
+		case <-c.publish:
+			if c.hasPending() {
+				if err := c.sendSnapshot(ctx, stream); err != nil {
+					return err
+				}
 			}
 		case <-ticker.C:
 			sequence++
@@ -483,20 +528,37 @@ func (c *Client) runStream(ctx context.Context, connection *grpc.ClientConn) err
 }
 
 func (c *Client) sendSnapshot(ctx context.Context, stream controlv1.ControlService_ConnectClient) error {
-	if c.config.Snapshot == nil {
-		return errors.New("master requested a snapshot but no snapshot provider is configured")
-	}
-	snapshot, err := c.config.Snapshot(ctx)
-	if err != nil {
-		return err
+	c.mu.Lock()
+	snapshot := c.pending
+	generation := c.generation
+	c.mu.Unlock()
+	if snapshot == nil && c.config.Snapshot != nil {
+		var err error
+		snapshot, err = c.config.Snapshot(ctx)
+		if err != nil {
+			return err
+		}
 	}
 	if snapshot == nil {
-		return errors.New("snapshot provider returned nil")
+		return errors.New("master requested a snapshot but none is available")
 	}
 	if err := stream.Send(&controlv1.SlaveToMaster{Payload: &controlv1.SlaveToMaster_Snapshot{Snapshot: snapshot}}); err != nil {
 		return err
 	}
+	if generation != 0 {
+		c.mu.Lock()
+		if generation > c.sentGeneration {
+			c.sentGeneration = generation
+		}
+		c.mu.Unlock()
+	}
 	return stream.Send(&controlv1.SlaveToMaster{Payload: &controlv1.SlaveToMaster_ResyncComplete{ResyncComplete: &controlv1.ResyncComplete{Revision: snapshot.GetRevision(), SnapshotId: snapshot.GetSnapshotId()}}})
+}
+
+func (c *Client) hasPending() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pending != nil && c.generation > c.sentGeneration
 }
 
 var _ controlv1.ControlServiceServer = (*Server)(nil)

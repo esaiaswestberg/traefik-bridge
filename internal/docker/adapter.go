@@ -72,8 +72,8 @@ func (a *Adapter) ListContainers(ctx context.Context) ([]Container, error) {
 		}
 		networks := make(map[string]Network)
 		if summary.NetworkSettings != nil {
-			for networkName := range summary.NetworkSettings.Networks {
-				networks[networkName] = Network{}
+			for networkName, settings := range summary.NetworkSettings.Networks {
+				networks[networkName] = Network{IPAddress: settings.IPAddress}
 			}
 		}
 		ports := make([]uint32, 0, len(summary.Ports))

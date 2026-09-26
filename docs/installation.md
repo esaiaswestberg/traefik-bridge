@@ -8,6 +8,10 @@ Build the three images from the repository root:
 make docker-build
 ```
 
-For a two-host deployment, follow [the Compose example](../examples/two-host/README.md). Supply `BRIDGE_CLUSTER_SECRET` through a secret manager or the deployment environment, never a committed Compose or `.env` file. Mount `deploy/traefik/bridge-transport.yml` in Traefik and provide the master-issued CA and client certificate files at the paths it names.
+For a two-host deployment, follow [the Compose example](../examples/two-host/README.md). Mount `deploy/traefik/bridge-transport.yml` in Traefik and provide the master-issued CA and client certificate files at the paths it names.
 
-The checked-in Compose files are valid configuration examples, but the current command binaries are placeholders and exit after logging that they are not configured. They do not yet open listeners, enroll peers, or reconcile Docker containers.
+## Slave credentials
+
+`bridge-slave` only starts with provisioned mTLS and route-signing material. Configure `BRIDGE_SLAVE_ID`, `BRIDGE_CA_FILE`, `BRIDGE_CERTIFICATE_FILE`, `BRIDGE_PRIVATE_KEY_FILE`, and `BRIDGE_ROUTE_SIGNING_KEY_FILE`, along with the master and data addresses and `BRIDGE_DOCKER_NETWORK`. The slave certificate must identify the configured slave ID and be issued by the same CA used by the master.
+
+The certificate, private key, CA, and route-signing key must be delivered by an authenticated deployment workflow and mounted read-only. Enrollment is not implemented: in particular, this project does not accept a shared secret, token, or unauthenticated request to issue a slave certificate until an audited PAKE enrollment flow exists.

@@ -112,6 +112,45 @@ func TestClientResyncAndDisconnectGrace(t *testing.T) {
 	}
 }
 
+func TestClientPublishesQueuedSnapshots(t *testing.T) {
+	authority := newAuthority(t)
+	pair := issueSlave(t, authority, "slave-a")
+	var revision atomic.Uint64
+	server, dial := startServer(t, authority, ServerConfig{
+		EndpointAllowlist: EndpointAllowlist{DNSNames: []string{"node.example"}},
+		SnapshotHandler: snapshotHandler(func(_ context.Context, _ string, snapshot *controlv1.FullSnapshot) ([]*controlv1.ResourceRejection, error) {
+			revision.Store(snapshot.GetRevision())
+			return nil, nil
+		}),
+	})
+	_ = server
+	client, err := NewClient(ClientConfig{SlaveID: "slave-a", Endpoint: &controlv1.SlaveEndpoint{Host: "node.example", Port: 443}, ReconnectDelay: time.Millisecond, Dial: func(context.Context) (*grpc.ClientConn, error) { return dial(pair) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.PublishSnapshot(context.Background(), &controlv1.FullSnapshot{Revision: 1}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- client.Run(ctx) }()
+	waitFor(t, time.Second, func() bool { return revision.Load() == 1 })
+	if err := client.PublishSnapshot(context.Background(), &controlv1.FullSnapshot{Revision: 2}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, time.Second, func() bool { return revision.Load() == 2 })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+type snapshotHandler func(context.Context, string, *controlv1.FullSnapshot) ([]*controlv1.ResourceRejection, error)
+
+func (f snapshotHandler) Apply(ctx context.Context, slaveID string, snapshot *controlv1.FullSnapshot) ([]*controlv1.ResourceRejection, error) {
+	return f(ctx, slaveID, snapshot)
+}
+
 func newAuthority(t *testing.T) *bridgecrypto.Authority {
 	t.Helper()
 	authority, err := bridgecrypto.Initialize(state.NewStore(filepath.Join(t.TempDir(), "state")))

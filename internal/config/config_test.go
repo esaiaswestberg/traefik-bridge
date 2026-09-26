@@ -25,7 +25,7 @@ func TestLoadMasterRejectsInvalidConfiguration(t *testing.T) {
 }
 
 func TestLoadSlave(t *testing.T) {
-	config, err := loadSlave(environment(map[string]string{"BRIDGE_MASTER_ADDRESS": "master:8443", "BRIDGE_DATA_ADDRESS": "slave:8444", "BRIDGE_DOCKER_NETWORK": "apps", "BRIDGE_CONSTRAINT_LABELS": "bridge.zone=east,team=platform"}))
+	config, err := loadSlave(environment(slaveEnvironment(map[string]string{"BRIDGE_CONSTRAINT_LABELS": "bridge.zone=east,team=platform"})))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestLoadSlave(t *testing.T) {
 }
 
 func TestLoadSlaveRejectsInvalidConstraints(t *testing.T) {
-	_, err := loadSlave(environment(map[string]string{"BRIDGE_MASTER_ADDRESS": "master", "BRIDGE_DATA_ADDRESS": "slave", "BRIDGE_DOCKER_NETWORK": "apps", "BRIDGE_CONSTRAINT_LABELS": "invalid"}))
+	_, err := loadSlave(environment(slaveEnvironment(map[string]string{"BRIDGE_CONSTRAINT_LABELS": "invalid"})))
 	if err == nil {
 		t.Fatal("LoadSlave succeeded with malformed constraints")
 	}
@@ -53,4 +53,16 @@ func TestLoadProxy(t *testing.T) {
 
 func environment(values map[string]string) func(string) string {
 	return func(key string) string { return values[key] }
+}
+
+func slaveEnvironment(values map[string]string) map[string]string {
+	base := map[string]string{
+		"BRIDGE_MASTER_ADDRESS": "master:8443", "BRIDGE_DATA_ADDRESS": "slave:8444", "BRIDGE_DOCKER_NETWORK": "apps",
+		"BRIDGE_SLAVE_ID": "slave-a", "BRIDGE_CA_FILE": "/certs/ca.crt", "BRIDGE_CERTIFICATE_FILE": "/certs/slave.crt",
+		"BRIDGE_PRIVATE_KEY_FILE": "/certs/slave.key", "BRIDGE_ROUTE_SIGNING_KEY_FILE": "/certs/route.key",
+	}
+	for key, value := range values {
+		base[key] = value
+	}
+	return base
 }

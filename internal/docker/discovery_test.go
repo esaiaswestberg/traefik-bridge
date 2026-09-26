@@ -72,6 +72,24 @@ func TestSnapshotSkipsContainersWithoutSelectedNetworkOrPort(t *testing.T) {
 	}
 }
 
+func TestServicesUsesSelectedNetworkAddress(t *testing.T) {
+	client := &fakeClient{containers: []Container{{
+		ID: "app", Name: "/app", Labels: map[string]string{traefikEnableLabel: "true", traefikNetworkLabel: "edge", "traefik.http.services.api.loadbalancer.server.port": "8080"},
+		Networks: map[string]Network{"apps": {IPAddress: "172.18.0.2"}, "edge": {IPAddress: "172.19.0.3"}},
+	}}}
+	discovery, err := NewDiscovery(client, &fakePublisher{}, Config{DefaultNetwork: "apps"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	services, err := discovery.Services(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := services["api"]; len(got) != 1 || got[0].String() != "http://172.19.0.3:8080" {
+		t.Fatalf("targets = %#v", got)
+	}
+}
+
 func TestSnapshotAcceptsExplicitPortWithoutExposedMetadata(t *testing.T) {
 	client := &fakeClient{containers: []Container{{
 		ID:       "app",

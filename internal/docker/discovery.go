@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,7 +33,9 @@ type Container struct {
 }
 
 // Network describes one network attached to a container.
-type Network struct{}
+type Network struct {
+	IPAddress string
+}
 
 // Event is a Docker event. Type normally is "container".
 type Event struct {
@@ -112,6 +115,32 @@ func (d *Discovery) Publish(ctx context.Context) error {
 		return fmt.Errorf("publish Docker snapshot: %w", err)
 	}
 	return nil
+}
+
+// Services returns local HTTP targets for the currently eligible containers.
+// Each target uses the container address on the exact network selected for its
+// advertised application, never a published host port.
+func (d *Discovery) Services(ctx context.Context) (map[string][]*url.URL, error) {
+	containers, err := d.client.ListContainers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list Docker containers: %w", err)
+	}
+	result := make(map[string][]*url.URL)
+	for _, container := range containers {
+		application, ok := d.application(container)
+		if !ok {
+			continue
+		}
+		address := strings.TrimSpace(container.Networks[application.GetNetwork()].IPAddress)
+		if address == "" {
+			continue
+		}
+		for _, service := range application.GetServices() {
+			target := &url.URL{Scheme: "http", Host: fmt.Sprintf("%s:%d", address, service.GetTargetPort())}
+			result[service.GetServiceId()] = append(result[service.GetServiceId()], target)
+		}
+	}
+	return result, nil
 }
 
 // Run publishes an initial snapshot, then publishes after events which can
