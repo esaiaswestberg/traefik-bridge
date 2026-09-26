@@ -1,7 +1,7 @@
 GO ?= go
 BIN_DIR ?= bin
 
-.PHONY: build build-linux check fmt lint test
+.PHONY: build build-linux check fmt generate lint test
 
 build:
 	$(GO) build ./cmd/...
@@ -16,6 +16,9 @@ build-linux:
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -o $(BIN_DIR)/linux-arm64/bridge-proxy ./cmd/bridge-proxy
 
 check: fmt lint test
+
+generate:
+	buf generate
 
 fmt:
 	$(GO) fmt ./...

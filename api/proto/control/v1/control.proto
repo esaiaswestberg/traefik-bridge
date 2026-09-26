@@ -1,0 +1,189 @@
+syntax = "proto3";
+
+package traefik.bridge.control.v1;
+
+option go_package = "github.com/traefik/traefik-bridge/api/gen/go/control/v1;controlv1";
+
+import "google/protobuf/timestamp.proto";
+
+service EnrollmentService {
+  // Enroll is used only before the slave has an mTLS certificate.
+  rpc Enroll(stream EnrollmentRequest) returns (stream EnrollmentResponse);
+}
+
+service ControlService {
+  // Connect is the persistent, mutually-authenticated control connection.
+  rpc Connect(stream SlaveToMaster) returns (stream MasterToSlave);
+}
+
+message EnrollmentRequest {
+  string protocol_version = 1;
+  bytes enrollment_id = 2;
+  bytes pake_message = 3;
+  bytes csr_der = 4;
+  SlaveEndpoint endpoint = 5;
+}
+
+message EnrollmentResponse {
+  bytes enrollment_id = 1;
+  bytes pake_message = 2;
+  oneof result {
+    EnrollmentAccepted accepted = 3;
+    EnrollmentRejected rejected = 4;
+  }
+}
+
+message EnrollmentAccepted {
+  string slave_id = 1;
+  CertificateBundle certificate = 2;
+  google.protobuf.Timestamp renew_after = 3;
+  bytes master_ca_pem = 4;
+}
+
+message EnrollmentRejected {
+  RejectionCode code = 1;
+  string message = 2;
+}
+
+message SlaveToMaster {
+  oneof payload {
+    ControlHello hello = 1;
+    Heartbeat heartbeat = 2;
+    FullSnapshot snapshot = 3;
+    CertificateRenewalRequest renew_certificate = 4;
+    ResyncComplete resync_complete = 5;
+  }
+}
+
+message MasterToSlave {
+  oneof payload {
+    ControlAccepted accepted = 1;
+    SnapshotAccepted snapshot_accepted = 2;
+    SnapshotRejected snapshot_rejected = 3;
+    ResyncRequest resync_request = 4;
+    CertificateRenewalResponse renewed_certificate = 5;
+    CommandRejected command_rejected = 6;
+  }
+}
+
+message ControlHello {
+  string slave_id = 1;
+  string protocol_version = 2;
+  string master_instance_id_seen = 3;
+  uint64 last_accepted_snapshot_revision = 4;
+  SlaveEndpoint endpoint = 5;
+}
+
+message ControlAccepted {
+  string master_instance_id = 1;
+  google.protobuf.Timestamp server_time = 2;
+  google.protobuf.Timestamp certificate_renew_after = 3;
+  bool snapshot_required = 4;
+}
+
+message Heartbeat {
+  uint64 sequence = 1;
+  google.protobuf.Timestamp sent_at = 2;
+  uint64 last_accepted_snapshot_revision = 3;
+  SlaveEndpoint endpoint = 4;
+}
+
+message SlaveEndpoint {
+  string host = 1;
+  uint32 port = 2;
+}
+
+message FullSnapshot {
+  uint64 revision = 1;
+  bytes snapshot_id = 2;
+  repeated ApplicationSnapshot applications = 3;
+}
+
+message ApplicationSnapshot {
+  string application_id = 1;
+  string container_name = 2;
+  map<string, string> labels = 3;
+  string network = 4;
+  repeated ExportedService services = 5;
+}
+
+message ExportedService {
+  string service_id = 1;
+  uint32 target_port = 2;
+}
+
+message SnapshotAccepted {
+  uint64 revision = 1;
+  bytes snapshot_id = 2;
+}
+
+message SnapshotRejected {
+  uint64 revision = 1;
+  bytes snapshot_id = 2;
+  repeated ResourceRejection rejections = 3;
+}
+
+message ResourceRejection {
+  string application_id = 1;
+  string resource_id = 2;
+  RejectionCode code = 3;
+  string message = 4;
+}
+
+message ResyncRequest {
+  string master_instance_id = 1;
+  ResyncReason reason = 2;
+  uint64 last_accepted_snapshot_revision = 3;
+  string message = 4;
+}
+
+message ResyncComplete {
+  uint64 revision = 1;
+  bytes snapshot_id = 2;
+}
+
+message CertificateRenewalRequest {
+  bytes request_id = 1;
+  bytes csr_der = 2;
+}
+
+message CertificateRenewalResponse {
+  bytes request_id = 1;
+  oneof result {
+    CertificateBundle certificate = 2;
+    EnrollmentRejected rejected = 3;
+  }
+}
+
+message CertificateBundle {
+  bytes leaf_certificate_pem = 1;
+  repeated bytes chain_pem = 2;
+  google.protobuf.Timestamp not_after = 3;
+}
+
+message CommandRejected {
+  RejectionCode code = 1;
+  string message = 2;
+}
+
+enum RejectionCode {
+  REJECTION_CODE_UNSPECIFIED = 0;
+  REJECTION_CODE_UNAUTHENTICATED = 1;
+  REJECTION_CODE_UNAUTHORIZED = 2;
+  REJECTION_CODE_INVALID_ARGUMENT = 3;
+  REJECTION_CODE_INVALID_LABEL = 4;
+  REJECTION_CODE_RESOURCE_CONFLICT = 5;
+  REJECTION_CODE_ENDPOINT_NOT_ALLOWED = 6;
+  REJECTION_CODE_STALE_REVISION = 7;
+  REJECTION_CODE_PROTOCOL_UNSUPPORTED = 8;
+  REJECTION_CODE_CERTIFICATE_DENIED = 9;
+  REJECTION_CODE_INTERNAL = 10;
+}
+
+enum ResyncReason {
+  RESYNC_REASON_UNSPECIFIED = 0;
+  RESYNC_REASON_MASTER_RESTART = 1;
+  RESYNC_REASON_STATE_MISSING = 2;
+  RESYNC_REASON_REVISION_GAP = 3;
+  RESYNC_REASON_OPERATOR_REQUEST = 4;
+}
