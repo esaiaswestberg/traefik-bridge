@@ -1,0 +1,9 @@
+http:
+  serversTransports:
+    bridge-mtls:
+      serverName: backend
+      rootCAs:
+        - /certs/ca.crt
+      certificates:
+        - certFile: /certs/client.crt
+          keyFile: /certs/client.key

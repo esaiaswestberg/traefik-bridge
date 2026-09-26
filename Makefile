@@ -1,7 +1,7 @@
 GO ?= go
 BIN_DIR ?= bin
 
-.PHONY: build build-linux check fmt generate lint test
+.PHONY: build build-linux check fmt generate lint test integration-docker-provider
 
 build:
 	$(GO) build ./cmd/...
@@ -28,3 +28,6 @@ lint:
 
 test:
 	$(GO) test ./...
+
+integration-docker-provider:
+	./tests/integration/docker-provider/run.sh
