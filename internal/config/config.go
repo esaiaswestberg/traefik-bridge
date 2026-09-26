@@ -13,12 +13,15 @@ const defaultDockerHost = "unix:///var/run/docker.sock"
 
 // Master configures the bridge master runtime.
 type Master struct {
-	DataDir        string
-	ProxyImage     string
-	DockerHost     string
-	ControlAddress string
-	ProxyPortStart uint32
-	ProxyPortEnd   uint32
+	DataDir              string
+	ProxyImage           string
+	DockerHost           string
+	ControlAddress       string
+	ObservabilityAddress string
+	EndpointCIDRs        []string
+	EndpointDNSNames     []string
+	ProxyPortStart       uint32
+	ProxyPortEnd         uint32
 }
 
 // Slave configures the bridge slave runtime.
@@ -52,12 +55,15 @@ func LoadProxy() (Proxy, error) {
 
 func loadMaster(getenv func(string) string) (Master, error) {
 	config := Master{
-		DataDir:        value(getenv, "BRIDGE_DATA_DIR", "/bridge"),
-		ProxyImage:     strings.TrimSpace(getenv("BRIDGE_PROXY_IMAGE")),
-		DockerHost:     value(getenv, "BRIDGE_DOCKER_HOST", defaultDockerHost),
-		ControlAddress: value(getenv, "BRIDGE_CONTROL_ADDRESS", ":8443"),
-		ProxyPortStart: 20000,
-		ProxyPortEnd:   29999,
+		DataDir:              value(getenv, "BRIDGE_DATA_DIR", "/bridge"),
+		ProxyImage:           strings.TrimSpace(getenv("BRIDGE_PROXY_IMAGE")),
+		DockerHost:           value(getenv, "BRIDGE_DOCKER_HOST", defaultDockerHost),
+		ControlAddress:       value(getenv, "BRIDGE_CONTROL_ADDRESS", ":8443"),
+		ObservabilityAddress: value(getenv, "BRIDGE_OBSERVABILITY_ADDRESS", ":8080"),
+		EndpointCIDRs:        list(getenv("BRIDGE_ENDPOINT_CIDRS")),
+		EndpointDNSNames:     list(getenv("BRIDGE_ENDPOINT_DNS_NAMES")),
+		ProxyPortStart:       20000,
+		ProxyPortEnd:         29999,
 	}
 	if config.ProxyImage == "" {
 		return Master{}, errors.New("BRIDGE_PROXY_IMAGE is required")
@@ -112,6 +118,16 @@ func value(getenv func(string) string, name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func list(value string) []string {
+	var result []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 func port(getenv func(string) string, name string, fallback uint32) (uint32, error) {

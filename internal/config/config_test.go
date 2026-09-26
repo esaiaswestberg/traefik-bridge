@@ -3,12 +3,15 @@ package config
 import "testing"
 
 func TestLoadMaster(t *testing.T) {
-	config, err := loadMaster(environment(map[string]string{"BRIDGE_PROXY_IMAGE": "proxy:latest", "BRIDGE_PROXY_PORT_START": "21000", "BRIDGE_PROXY_PORT_END": "21010"}))
+	config, err := loadMaster(environment(map[string]string{"BRIDGE_PROXY_IMAGE": "proxy:latest", "BRIDGE_PROXY_PORT_START": "21000", "BRIDGE_PROXY_PORT_END": "21010", "BRIDGE_ENDPOINT_CIDRS": "10.0.0.0/8, 192.168.0.0/16", "BRIDGE_ENDPOINT_DNS_NAMES": " slave.example.test ,slave-2.example.test"}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.DataDir != "/bridge" || config.DockerHost != defaultDockerHost || config.ProxyPortStart != 21000 || config.ProxyPortEnd != 21010 {
+	if config.DataDir != "/bridge" || config.DockerHost != defaultDockerHost || config.ObservabilityAddress != ":8080" || config.ProxyPortStart != 21000 || config.ProxyPortEnd != 21010 {
 		t.Fatalf("config = %#v", config)
+	}
+	if len(config.EndpointCIDRs) != 2 || len(config.EndpointDNSNames) != 2 {
+		t.Fatalf("endpoint allowlist = %#v, %#v", config.EndpointCIDRs, config.EndpointDNSNames)
 	}
 }
 

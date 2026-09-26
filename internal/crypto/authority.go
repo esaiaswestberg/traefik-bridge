@@ -68,6 +68,9 @@ func (a *Authority) MasterServer() state.KeyPair { return a.state.MasterServer }
 // MasterClient returns the PEM certificate and key for master-to-slave TLS.
 func (a *Authority) MasterClient() state.KeyPair { return a.state.MasterClient }
 
+// MasterID returns the stable identifier assigned when the authority is created.
+func (a *Authority) MasterID() string { return a.state.MasterID }
+
 // MatchesSlave reports whether cert is the currently issued certificate for
 // slaveID. TLS verification is performed by the caller.
 func (a *Authority) MatchesSlave(slaveID string, cert *x509.Certificate) bool {
