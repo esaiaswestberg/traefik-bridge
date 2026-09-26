@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -80,6 +82,29 @@ func (a *Authority) MatchesSlave(slaveID string, cert *x509.Certificate) bool {
 
 // CACertificate returns the PEM-encoded bridge CA certificate.
 func (a *Authority) CACertificate() []byte { return append([]byte(nil), a.state.CA.CertificatePEM...) }
+
+// ExportPEM atomically writes the CA and master client TLS material for
+// Traefik's shared ServersTransport. Private keys remain owner-readable only.
+func (a *Authority) ExportPEM(dir string) error {
+	if strings.TrimSpace(dir) == "" {
+		return errors.New("certificate directory is required")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create certificate directory: %w", err)
+	}
+	if err := writePEM(filepath.Join(dir, "ca.crt"), a.state.CA.CertificatePEM, 0o644); err != nil {
+		return err
+	}
+	if err := writePEM(filepath.Join(dir, "master-client.crt"), a.state.MasterClient.CertificatePEM, 0o644); err != nil {
+		return err
+	}
+	if err := writePEM(filepath.Join(dir, "master-client.key"), a.state.MasterClient.PrivateKeyPEM, 0o600); err != nil {
+		return err
+	}
+	return nil
+}
 
 // IssueSlave signs csrDER for slaveID and records the issued certificate. The
 // caller must authenticate enrollment before calling this method.
@@ -227,4 +252,40 @@ func randomSerial() (*big.Int, error) {
 		return nil, fmt.Errorf("generate certificate serial: %w", err)
 	}
 	return serial, nil
+}
+
+func writePEM(path string, contents []byte, mode os.FileMode) error {
+	if len(contents) == 0 {
+		return fmt.Errorf("certificate material for %q is empty", path)
+	}
+	if info, err := os.Lstat(path); err == nil && (!info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0) {
+		return fmt.Errorf("certificate path %q is not a regular file", path)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect certificate path %q: %w", path, err)
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".bridge-pem-*")
+	if err != nil {
+		return fmt.Errorf("create temporary certificate file: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer func() { _ = os.Remove(temporaryPath) }()
+	if err := temporary.Chmod(mode); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("secure temporary certificate file: %w", err)
+	}
+	if _, err := temporary.Write(contents); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("write certificate file: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("sync certificate file: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close certificate file: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("replace certificate file: %w", err)
+	}
+	return nil
 }

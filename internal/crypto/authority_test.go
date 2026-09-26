@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -31,6 +32,41 @@ func TestInitializeReusesPersistedAuthority(t *testing.T) {
 	}
 	if string(first.MasterClient().CertificatePEM) != string(second.MasterClient().CertificatePEM) {
 		t.Error("master client certificate changed after restart")
+	}
+}
+
+func TestExportPEM(t *testing.T) {
+	authority, err := Initialize(state.NewStore(filepath.Join(t.TempDir(), "master")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "certs")
+	if err := authority.ExportPEM(dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []struct {
+		name string
+		want []byte
+		mode os.FileMode
+	}{
+		{"ca.crt", authority.CACertificate(), 0o644},
+		{"master-client.crt", authority.MasterClient().CertificatePEM, 0o644},
+		{"master-client.key", authority.MasterClient().PrivateKeyPEM, 0o600},
+	} {
+		contents, err := os.ReadFile(filepath.Join(dir, file.name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(contents) != string(file.want) {
+			t.Errorf("%s contents differ", file.name)
+		}
+		info, err := os.Stat(filepath.Join(dir, file.name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != file.mode {
+			t.Errorf("%s mode = %o, want %o", file.name, info.Mode().Perm(), file.mode)
+		}
 	}
 }
 
