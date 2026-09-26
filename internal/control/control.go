@@ -102,6 +102,14 @@ func validDNSName(host string) bool {
 type ServerConfig struct {
 	EndpointAllowlist EndpointAllowlist
 	DisconnectGrace   time.Duration
+	SnapshotHandler   SnapshotHandler
+}
+
+// SnapshotHandler applies a full snapshot after its control-stream identity
+// has been authenticated. It may reject individual resources while accepting
+// the valid remainder.
+type SnapshotHandler interface {
+	Apply(context.Context, string, *controlv1.FullSnapshot) ([]*controlv1.ResourceRejection, error)
 }
 
 // SessionStatus is the observed state of one slave control stream.
@@ -126,6 +134,7 @@ type Server struct {
 	allowlist allowlist
 	instance  string
 	grace     time.Duration
+	handler   SnapshotHandler
 	mu        sync.Mutex
 	sessions  map[string]session
 	nextID    uint64
@@ -151,7 +160,7 @@ func NewServer(authority *crypto.Authority, config ServerConfig) (*Server, error
 	if err != nil {
 		return nil, err
 	}
-	return &Server{authority: authority, allowlist: allowed, instance: instance, grace: grace, sessions: make(map[string]session)}, nil
+	return &Server{authority: authority, allowlist: allowed, instance: instance, grace: grace, handler: config.SnapshotHandler, sessions: make(map[string]session)}, nil
 }
 
 // Register registers the control service on registrar.
@@ -232,8 +241,26 @@ func (s *Server) Connect(stream controlv1.ControlService_ConnectServer) error {
 			}
 			s.heartbeat(hello.GetSlaveId(), payload.Heartbeat.GetEndpoint(), payload.Heartbeat.GetLastAcceptedSnapshotRevision())
 		case *controlv1.SlaveToMaster_Snapshot:
-			s.acceptSnapshot(hello.GetSlaveId(), payload.Snapshot.GetRevision())
-			if err := stream.Send(&controlv1.MasterToSlave{Payload: &controlv1.MasterToSlave_SnapshotAccepted{SnapshotAccepted: &controlv1.SnapshotAccepted{Revision: payload.Snapshot.GetRevision(), SnapshotId: payload.Snapshot.GetSnapshotId()}}}); err != nil {
+			snapshot := payload.Snapshot
+			if snapshot == nil {
+				return status.Error(codes.InvalidArgument, "snapshot is required")
+			}
+			var rejections []*controlv1.ResourceRejection
+			if s.handler != nil {
+				var applyErr error
+				rejections, applyErr = s.handler.Apply(stream.Context(), hello.GetSlaveId(), snapshot)
+				if applyErr != nil {
+					return status.Error(codes.Internal, fmt.Sprintf("apply snapshot: %v", applyErr))
+				}
+			}
+			s.acceptSnapshot(hello.GetSlaveId(), snapshot.GetRevision())
+			if len(rejections) > 0 {
+				if err := stream.Send(&controlv1.MasterToSlave{Payload: &controlv1.MasterToSlave_SnapshotRejected{SnapshotRejected: &controlv1.SnapshotRejected{Revision: snapshot.GetRevision(), SnapshotId: snapshot.GetSnapshotId(), Rejections: rejections}}}); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := stream.Send(&controlv1.MasterToSlave{Payload: &controlv1.MasterToSlave_SnapshotAccepted{SnapshotAccepted: &controlv1.SnapshotAccepted{Revision: snapshot.GetRevision(), SnapshotId: snapshot.GetSnapshotId()}}}); err != nil {
 				return err
 			}
 		}
