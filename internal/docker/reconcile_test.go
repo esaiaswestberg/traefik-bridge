@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -104,6 +105,36 @@ func TestRefreshReplacesOnlyDueProxies(t *testing.T) {
 	}
 }
 
+func TestRunRefreshesSnapshotAppliedAfterEmptyStart(t *testing.T) {
+	client := &fakeReconcileClient{listed: make(chan struct{}, 1)}
+	reconciler := newReconcilerWithTiming(t, client, 21000, 21010, 100*time.Millisecond, 80*time.Millisecond)
+	ctx, cancel := context.WithCancel(t.Context())
+	run := make(chan error, 1)
+	go func() { run <- reconciler.Run(ctx) }()
+
+	select {
+	case <-client.listed:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not reconcile empty state")
+	}
+	if _, err := reconciler.Apply(ctx, "slave-a", endpoint(), snapshot(appSnapshot("app", "web", "api"))); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.After(time.Second)
+	for client.createCount() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("creates = %d, want refresh without waiting for the idle timer", client.createCount())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	cancel()
+	if err := <-run; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
 func TestRestoreBeforeAndAfterRefreshDeadline(t *testing.T) {
 	store, client := &fakeStateStore{}, &fakeReconcileClient{}
 	first := newPersistentReconciler(t, client, store)
@@ -154,12 +185,16 @@ func TestPersistenceFailurePreventsDockerMutation(t *testing.T) {
 }
 
 func newReconciler(t *testing.T, client *fakeReconcileClient, start, end uint32) *Reconciler {
+	return newReconcilerWithTiming(t, client, start, end, 0, 0)
+}
+
+func newReconcilerWithTiming(t *testing.T, client *fakeReconcileClient, start, end uint32, lifetime, refreshBefore time.Duration) *Reconciler {
 	t.Helper()
 	signer, err := proxy.NewSigner([]byte("test-key"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := NewReconciler(client, ReconcileConfig{MasterID: "master", ProxyImage: "proxy:test", PortStart: start, PortEnd: end, Signer: signer, CertificateMount: Mount{Source: "certs", Target: "/certs"}})
+	result, err := NewReconciler(client, ReconcileConfig{MasterID: "master", ProxyImage: "proxy:test", PortStart: start, PortEnd: end, Signer: signer, CertificateMount: Mount{Source: "certs", Target: "/certs"}, RouteTokenLifetime: lifetime, RouteTokenRefreshBefore: refreshBefore})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,14 +240,30 @@ func appSnapshot(id, router, service string) *controlv1.ApplicationSnapshot {
 }
 
 type fakeReconcileClient struct {
+	mu                      sync.Mutex
 	containers              []ManagedContainer
 	specs                   []ContainerSpec
 	creates, removes, lists int
+	listed                  chan struct{}
 }
 
 func (f *fakeReconcileClient) ListManaged(context.Context) ([]ManagedContainer, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.lists++
+	if f.listed != nil {
+		select {
+		case f.listed <- struct{}{}:
+		default:
+		}
+	}
 	return append([]ManagedContainer(nil), f.containers...), nil
+}
+
+func (f *fakeReconcileClient) createCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.creates
 }
 
 type fakeStateStore struct {
@@ -237,12 +288,16 @@ func (s *fakeStateStore) Save(value *state.ReconcilerState) error {
 	return nil
 }
 func (f *fakeReconcileClient) CreateManaged(_ context.Context, spec ContainerSpec) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.creates++
 	f.specs = append(f.specs, spec)
 	f.containers = append(f.containers, ManagedContainer{ID: spec.Name, Name: spec.Name, Labels: spec.Labels})
 	return nil
 }
 func (f *fakeReconcileClient) RemoveManaged(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.removes++
 	for i, container := range f.containers {
 		if container.ID == id {

@@ -74,14 +74,15 @@ type ReconcileConfig struct {
 }
 
 type Reconciler struct {
-	client    ReconcileClient
-	config    ReconcileConfig
-	mu        sync.Mutex
-	snapshots map[string][]labels.Application
-	endpoints map[string]*controlv1.SlaveEndpoint
-	versions  map[string]uint64
-	expiries  map[string]time.Time
-	restored  bool
+	client          ReconcileClient
+	config          ReconcileConfig
+	mu              sync.Mutex
+	snapshots       map[string][]labels.Application
+	endpoints       map[string]*controlv1.SlaveEndpoint
+	versions        map[string]uint64
+	expiries        map[string]time.Time
+	restored        bool
+	scheduleChanged chan struct{}
 }
 
 func NewReconciler(client ReconcileClient, config ReconcileConfig) (*Reconciler, error) {
@@ -109,7 +110,7 @@ func NewReconciler(client ReconcileClient, config ReconcileConfig) (*Reconciler,
 	if config.RouteTokenRefreshBefore <= 0 || config.RouteTokenRefreshBefore >= config.RouteTokenLifetime {
 		return nil, errors.New("route token refresh before must be positive and less than the route token lifetime")
 	}
-	return &Reconciler{client: client, config: config, snapshots: map[string][]labels.Application{}, endpoints: map[string]*controlv1.SlaveEndpoint{}, versions: map[string]uint64{}, expiries: map[string]time.Time{}}, nil
+	return &Reconciler{client: client, config: config, snapshots: map[string][]labels.Application{}, endpoints: map[string]*controlv1.SlaveEndpoint{}, versions: map[string]uint64{}, expiries: map[string]time.Time{}, scheduleChanged: make(chan struct{}, 1)}, nil
 }
 
 // Restore loads accepted snapshots and expiry timestamps before control traffic starts.
@@ -171,17 +172,38 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	timer := time.NewTimer(r.nextRefreshDelay())
+	defer stopTimer(timer)
 	for {
-		delay := r.nextRefreshDelay()
-		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return nil
+		case <-r.scheduleChanged:
+			resetTimer(timer, r.nextRefreshDelay())
 		case <-timer.C:
 			if err := r.refresh(ctx); err != nil {
 				return err
 			}
+			resetTimer(timer, r.nextRefreshDelay())
+		}
+	}
+}
+
+func resetTimer(timer *time.Timer, delay time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(delay)
+}
+
+func stopTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
 		}
 	}
 }
@@ -268,10 +290,18 @@ func (r *Reconciler) Apply(ctx context.Context, slaveID string, endpoint *contro
 		return rejected, err
 	}
 	r.snapshots, r.endpoints, r.versions, r.expiries = candidateSnapshots, candidateEndpoints, candidateVersions, candidateExpiries
+	r.wakeScheduler()
 	if err := r.reconcileLocked(ctx); err != nil {
 		return rejected, err
 	}
 	return rejected, nil
+}
+
+func (r *Reconciler) wakeScheduler() {
+	select {
+	case r.scheduleChanged <- struct{}{}:
+	default:
+	}
 }
 
 func (r *Reconciler) persistLocked(snapshots map[string][]labels.Application, endpoints map[string]*controlv1.SlaveEndpoint, versions map[string]uint64, expiries map[string]time.Time) error {
