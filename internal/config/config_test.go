@@ -7,7 +7,7 @@ func TestLoadMaster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.DataDir != "/bridge" || config.DockerHost != defaultDockerHost || config.ObservabilityAddress != ":8080" || config.ProxyPortStart != 21000 || config.ProxyPortEnd != 21010 {
+	if config.DataDir != "/bridge" || config.DockerHost != defaultDockerHost || config.ObservabilityAddress != ":8080" || config.ProxyPortStart != 21000 || config.ProxyPortEnd != 21010 || config.RouteTokenRefreshBefore.String() != "1m0s" {
 		t.Fatalf("config = %#v", config)
 	}
 	if len(config.EndpointCIDRs) != 2 || len(config.EndpointDNSNames) != 2 {
@@ -21,6 +21,9 @@ func TestLoadMasterRejectsInvalidConfiguration(t *testing.T) {
 	}
 	if _, err := loadMaster(environment(masterEnvironment(map[string]string{"BRIDGE_PROXY_PORT_START": "30000", "BRIDGE_PROXY_PORT_END": "20000"}))); err == nil {
 		t.Fatal("LoadMaster succeeded with reversed port range")
+	}
+	if _, err := loadMaster(environment(masterEnvironment(map[string]string{"BRIDGE_ROUTE_TOKEN_LIFETIME": "1m", "BRIDGE_ROUTE_TOKEN_REFRESH_BEFORE": "1m"}))); err == nil {
+		t.Fatal("LoadMaster succeeded with refresh window equal to lifetime")
 	}
 }
 

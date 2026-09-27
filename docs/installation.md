@@ -44,6 +44,8 @@ docker compose -f examples/two-host/compose.master.yml up -d bridge-master
 
 ## Master proxy credentials
 
-`bridge-master` requires `BRIDGE_ROUTE_SIGNING_KEY_FILE`, containing the same route-signing key provisioned to each slave. It signs short-lived per-service route tokens while reconciling; generated `bridge-proxy` containers receive the tokens, never that key.
+`bridge-master` requires `BRIDGE_ROUTE_SIGNING_KEY_FILE`, containing the same route-signing key provisioned to each slave. It signs short-lived per-service route tokens while reconciling; generated `bridge-proxy` containers receive the tokens, never that key. `BRIDGE_ROUTE_TOKEN_LIFETIME` defaults to five minutes and `BRIDGE_ROUTE_TOKEN_REFRESH_BEFORE` defaults to one minute. The refresh window must be positive and shorter than the lifetime.
+
+The master records accepted snapshots and proxy expiry timestamps in its private data directory before changing Docker. It restores that state after restart and refreshes only proxies approaching expiry. The state never contains route tokens.
 
 Set `BRIDGE_PROXY_CERTIFICATE_MOUNT` to a Docker `source:target` mount, for example `bridge-master-data:/bridge` or `/srv/bridge-certs:/certs`. The source must contain `ca.crt`, `master-client.crt`, and `master-client.key`, which `bridge-master` exports in its data directory. Each generated proxy mounts it read-only and receives only these file paths through its environment. A named volume is preferred where practical; an absolute source is mounted as a read-only bind. Do not put certificates or private keys in generated container environment variables.

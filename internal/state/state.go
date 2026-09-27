@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const fileName = "master-state.json"
+const (
+	fileName           = "master-state.json"
+	reconcilerFileName = "reconciler-state.json"
+)
 
 // State is the complete persistent state owned by a bridge master.
 type State struct {
@@ -49,6 +52,24 @@ type Slave struct {
 	NotAfter       time.Time `json:"not_after"`
 }
 
+// ReconcilerState stores desired proxy configuration without route tokens.
+type ReconcilerState struct {
+	Version int                        `json:"version"`
+	Slaves  map[string]ReconcilerSlave `json:"slaves"`
+}
+
+// ReconcilerSlave is one slave's last accepted snapshot and route expiry per proxy.
+type ReconcilerSlave struct {
+	EndpointHost string               `json:"endpoint_host"`
+	EndpointPort uint32               `json:"endpoint_port"`
+	Revision     uint64               `json:"revision"`
+	Snapshot     json.RawMessage      `json:"snapshot"`
+	Expiries     map[string]time.Time `json:"expiries"`
+}
+
+// ReconcilerStore atomically persists reconciler state separately from CA state.
+type ReconcilerStore struct{ store *Store }
+
 // Store atomically reads and writes State in a private data directory.
 type Store struct {
 	dir string
@@ -60,27 +81,49 @@ func NewStore(dir string) *Store {
 	return &Store{dir: dir}
 }
 
+// NewReconcilerStore creates a store for desired proxy state rooted at dir.
+func NewReconcilerStore(dir string) *ReconcilerStore {
+	return &ReconcilerStore{store: &Store{dir: dir}}
+}
+
+// Load reads the last persisted reconciler state.
+func (s *ReconcilerStore) Load() (*ReconcilerState, error) {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	contents, err := s.store.load(reconcilerFileName)
+	if err != nil {
+		return nil, err
+	}
+	var value ReconcilerState
+	if err := json.Unmarshal(contents, &value); err != nil {
+		return nil, fmt.Errorf("decode reconciler state: %w", err)
+	}
+	if value.Slaves == nil {
+		value.Slaves = make(map[string]ReconcilerSlave)
+	}
+	return &value, nil
+}
+
+// Save atomically replaces reconciler state.
+func (s *ReconcilerStore) Save(value *ReconcilerState) error {
+	if value == nil {
+		return errors.New("reconciler state is required")
+	}
+	contents, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("encode reconciler state: %w", err)
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	return s.store.save(reconcilerFileName, contents)
+}
+
 // Load reads the previously saved state.
 func (s *Store) Load() (*State, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := checkDirectory(s.dir); err != nil {
-		return nil, err
-	}
-	path := filepath.Join(s.dir, fileName)
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("state file %q is not a regular file", path)
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("state file %q must not be accessible by group or others", path)
-	}
-
-	contents, err := os.ReadFile(path)
+	contents, err := s.load(fileName)
 	if err != nil {
 		return nil, err
 	}
@@ -102,6 +145,32 @@ func (s *Store) Save(value *State) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	contents, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("encode master state: %w", err)
+	}
+	return s.save(fileName, contents)
+}
+
+func (s *Store) load(name string) ([]byte, error) {
+	if err := checkDirectory(s.dir); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(s.dir, name)
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("state file %q is not a regular file", path)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("state file %q must not be accessible by group or others", path)
+	}
+	return os.ReadFile(path)
+}
+
+func (s *Store) save(name string, contents []byte) error {
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return fmt.Errorf("create state directory: %w", err)
 	}
@@ -109,10 +178,6 @@ func (s *Store) Save(value *State) error {
 		return fmt.Errorf("secure state directory: %w", err)
 	}
 
-	contents, err := json.Marshal(value)
-	if err != nil {
-		return fmt.Errorf("encode master state: %w", err)
-	}
 	contents = append(contents, '\n')
 
 	temporary, err := os.CreateTemp(s.dir, ".master-state-*")
@@ -136,7 +201,7 @@ func (s *Store) Save(value *State) error {
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close master state: %w", err)
 	}
-	if err := os.Rename(temporaryPath, filepath.Join(s.dir, fileName)); err != nil {
+	if err := os.Rename(temporaryPath, filepath.Join(s.dir, name)); err != nil {
 		return fmt.Errorf("replace master state: %w", err)
 	}
 

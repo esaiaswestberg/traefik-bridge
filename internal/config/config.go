@@ -14,20 +14,21 @@ const defaultDockerHost = "unix:///var/run/docker.sock"
 
 // Master configures the bridge master runtime.
 type Master struct {
-	DataDir               string
-	ProxyImage            string
-	DockerHost            string
-	ControlAddress        string
-	ObservabilityAddress  string
-	EndpointCIDRs         []string
-	EndpointDNSNames      []string
-	ProxyPortStart        uint32
-	ProxyPortEnd          uint32
-	RouteSigningKeyFile   string
-	ProxyCertificateMount string
-	RouteTokenLifetime    time.Duration
-	EnrollmentAddress     string
-	EnrollmentSecretFile  string
+	DataDir                 string
+	ProxyImage              string
+	DockerHost              string
+	ControlAddress          string
+	ObservabilityAddress    string
+	EndpointCIDRs           []string
+	EndpointDNSNames        []string
+	ProxyPortStart          uint32
+	ProxyPortEnd            uint32
+	RouteSigningKeyFile     string
+	ProxyCertificateMount   string
+	RouteTokenLifetime      time.Duration
+	RouteTokenRefreshBefore time.Duration
+	EnrollmentAddress       string
+	EnrollmentSecretFile    string
 }
 
 // Slave configures the bridge slave runtime.
@@ -81,20 +82,21 @@ func LoadProxy() (Proxy, error) {
 
 func loadMaster(getenv func(string) string) (Master, error) {
 	config := Master{
-		DataDir:               value(getenv, "BRIDGE_DATA_DIR", "/bridge"),
-		ProxyImage:            strings.TrimSpace(getenv("BRIDGE_PROXY_IMAGE")),
-		DockerHost:            value(getenv, "BRIDGE_DOCKER_HOST", defaultDockerHost),
-		ControlAddress:        value(getenv, "BRIDGE_CONTROL_ADDRESS", ":8443"),
-		ObservabilityAddress:  value(getenv, "BRIDGE_OBSERVABILITY_ADDRESS", ":8080"),
-		EndpointCIDRs:         list(getenv("BRIDGE_ENDPOINT_CIDRS")),
-		EndpointDNSNames:      list(getenv("BRIDGE_ENDPOINT_DNS_NAMES")),
-		ProxyPortStart:        20000,
-		ProxyPortEnd:          29999,
-		RouteSigningKeyFile:   strings.TrimSpace(getenv("BRIDGE_ROUTE_SIGNING_KEY_FILE")),
-		ProxyCertificateMount: strings.TrimSpace(getenv("BRIDGE_PROXY_CERTIFICATE_MOUNT")),
-		RouteTokenLifetime:    5 * time.Minute,
-		EnrollmentAddress:     strings.TrimSpace(getenv("BRIDGE_ENROLLMENT_ADDRESS")),
-		EnrollmentSecretFile:  strings.TrimSpace(getenv("BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE")),
+		DataDir:                 value(getenv, "BRIDGE_DATA_DIR", "/bridge"),
+		ProxyImage:              strings.TrimSpace(getenv("BRIDGE_PROXY_IMAGE")),
+		DockerHost:              value(getenv, "BRIDGE_DOCKER_HOST", defaultDockerHost),
+		ControlAddress:          value(getenv, "BRIDGE_CONTROL_ADDRESS", ":8443"),
+		ObservabilityAddress:    value(getenv, "BRIDGE_OBSERVABILITY_ADDRESS", ":8080"),
+		EndpointCIDRs:           list(getenv("BRIDGE_ENDPOINT_CIDRS")),
+		EndpointDNSNames:        list(getenv("BRIDGE_ENDPOINT_DNS_NAMES")),
+		ProxyPortStart:          20000,
+		ProxyPortEnd:            29999,
+		RouteSigningKeyFile:     strings.TrimSpace(getenv("BRIDGE_ROUTE_SIGNING_KEY_FILE")),
+		ProxyCertificateMount:   strings.TrimSpace(getenv("BRIDGE_PROXY_CERTIFICATE_MOUNT")),
+		RouteTokenLifetime:      5 * time.Minute,
+		RouteTokenRefreshBefore: time.Minute,
+		EnrollmentAddress:       strings.TrimSpace(getenv("BRIDGE_ENROLLMENT_ADDRESS")),
+		EnrollmentSecretFile:    strings.TrimSpace(getenv("BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE")),
 	}
 	if config.ProxyImage == "" {
 		return Master{}, errors.New("BRIDGE_PROXY_IMAGE is required")
@@ -108,6 +110,12 @@ func loadMaster(getenv func(string) string) (Master, error) {
 	var err error
 	if config.RouteTokenLifetime, err = duration(getenv, "BRIDGE_ROUTE_TOKEN_LIFETIME", config.RouteTokenLifetime); err != nil {
 		return Master{}, err
+	}
+	if config.RouteTokenRefreshBefore, err = duration(getenv, "BRIDGE_ROUTE_TOKEN_REFRESH_BEFORE", config.RouteTokenRefreshBefore); err != nil {
+		return Master{}, err
+	}
+	if config.RouteTokenRefreshBefore >= config.RouteTokenLifetime {
+		return Master{}, errors.New("BRIDGE_ROUTE_TOKEN_REFRESH_BEFORE must be less than BRIDGE_ROUTE_TOKEN_LIFETIME")
 	}
 	if config.ProxyPortStart, err = port(getenv, "BRIDGE_PROXY_PORT_START", config.ProxyPortStart); err != nil {
 		return Master{}, err

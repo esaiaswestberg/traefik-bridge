@@ -70,9 +70,12 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	reconciler, err := bridgedocker.NewReconciler(docker, bridgedocker.ReconcileConfig{MasterID: authority.MasterID(), ProxyImage: cfg.ProxyImage, PortStart: cfg.ProxyPortStart, PortEnd: cfg.ProxyPortEnd, Signer: signer, RouteTokenLifetime: cfg.RouteTokenLifetime, CertificateMount: certificateMount})
+	reconciler, err := bridgedocker.NewReconciler(docker, bridgedocker.ReconcileConfig{MasterID: authority.MasterID(), ProxyImage: cfg.ProxyImage, PortStart: cfg.ProxyPortStart, PortEnd: cfg.ProxyPortEnd, Signer: signer, RouteTokenLifetime: cfg.RouteTokenLifetime, RouteTokenRefreshBefore: cfg.RouteTokenRefreshBefore, CertificateMount: certificateMount, StateStore: state.NewReconcilerStore(cfg.DataDir)})
 	if err != nil {
 		return fmt.Errorf("initialize Docker reconciler: %w", err)
+	}
+	if err := reconciler.Restore(); err != nil {
+		return err
 	}
 	control, err := bridgecontrol.NewServer(authority, bridgecontrol.ServerConfig{
 		EndpointAllowlist: bridgecontrol.EndpointAllowlist{CIDRs: cfg.EndpointCIDRs, DNSNames: cfg.EndpointDNSNames},
@@ -128,7 +131,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	grpcServer := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConfig)))
 	control.Register(grpcServer)
-	errs := make(chan error, 3)
+	errs := make(chan error, 4)
+	go serve(errs, "route token refresh", func() error { return reconciler.Run(ctx) })
 	go serve(errs, "control gRPC", func() error { return grpcServer.Serve(controlListener) })
 	if enrollmentServer != nil {
 		go serve(errs, "development enrollment gRPC", func() error { return enrollmentServer.Serve(enrollmentListener) })

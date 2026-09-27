@@ -2,10 +2,16 @@ package docker
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"strings"
 	"testing"
+	"time"
 
 	controlv1 "github.com/traefik/traefik-bridge/api/gen/go/control/v1"
 	"github.com/traefik/traefik-bridge/internal/proxy"
+	"github.com/traefik/traefik-bridge/internal/state"
 )
 
 func TestReconcileCreatesReplacesAndCleansStaleContainers(t *testing.T) {
@@ -83,6 +89,70 @@ func TestPortAllocationIsStableAndResolvesCollisions(t *testing.T) {
 	}
 }
 
+func TestRefreshReplacesOnlyDueProxies(t *testing.T) {
+	client := &fakeReconcileClient{}
+	reconciler := newReconciler(t, client, 21000, 21010)
+	if _, err := reconciler.Apply(t.Context(), "slave-a", endpoint(), snapshot(appSnapshot("due", "due", "api"), appSnapshot("later", "later", "metrics"))); err != nil {
+		t.Fatal(err)
+	}
+	reconciler.expiries[identity("slave-a", "due")] = time.Now().Add(10 * time.Second)
+	if err := reconciler.refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if client.creates != 3 || client.removes != 1 {
+		t.Fatalf("refresh creates=%d removes=%d, want one replacement", client.creates, client.removes)
+	}
+}
+
+func TestRestoreBeforeAndAfterRefreshDeadline(t *testing.T) {
+	store, client := &fakeStateStore{}, &fakeReconcileClient{}
+	first := newPersistentReconciler(t, client, store)
+	if _, err := first.Apply(t.Context(), "slave-a", endpoint(), snapshot(appSnapshot("app", "web", "api"))); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := json.Marshal(store.value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range client.specs[0].Env {
+		if token, found := strings.CutPrefix(value, "BRIDGE_ROUTE_TOKENS="); found && strings.Contains(string(persisted), token) {
+			t.Fatal("persisted reconciler state contains a route token")
+		}
+	}
+	before := newPersistentReconciler(t, client, store)
+	if err := before.Restore(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := before.Apply(t.Context(), "slave-a", endpoint(), snapshot(appSnapshot("app", "web", "api"))); err != nil {
+		t.Fatal(err)
+	}
+	if client.creates != 1 || client.removes != 0 {
+		t.Fatalf("restore before deadline replaced proxy: creates=%d removes=%d", client.creates, client.removes)
+	}
+	store.value.Slaves["slave-a"] = state.ReconcilerSlave{EndpointHost: "slave.example", EndpointPort: 8444, Snapshot: store.value.Slaves["slave-a"].Snapshot, Expiries: map[string]time.Time{identity("slave-a", "app"): time.Now().Add(-time.Second)}}
+	after := newPersistentReconciler(t, client, store)
+	if err := after.Restore(); err != nil {
+		t.Fatal(err)
+	}
+	if err := after.refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if client.creates != 2 || client.removes != 1 {
+		t.Fatalf("restore after deadline did not refresh proxy: creates=%d removes=%d", client.creates, client.removes)
+	}
+}
+
+func TestPersistenceFailurePreventsDockerMutation(t *testing.T) {
+	client := &fakeReconcileClient{}
+	reconciler := newPersistentReconciler(t, client, &fakeStateStore{err: errors.New("disk full")})
+	if _, err := reconciler.Apply(t.Context(), "slave-a", endpoint(), snapshot(appSnapshot("app", "web", "api"))); err == nil {
+		t.Fatal("Apply succeeded despite persistence failure")
+	}
+	if client.creates != 0 || client.removes != 0 || client.lists != 0 {
+		t.Fatalf("persistence failure reached Docker: %+v", client)
+	}
+}
+
 func newReconciler(t *testing.T, client *fakeReconcileClient, start, end uint32) *Reconciler {
 	t.Helper()
 	signer, err := proxy.NewSigner([]byte("test-key"))
@@ -90,6 +160,19 @@ func newReconciler(t *testing.T, client *fakeReconcileClient, start, end uint32)
 		t.Fatal(err)
 	}
 	result, err := NewReconciler(client, ReconcileConfig{MasterID: "master", ProxyImage: "proxy:test", PortStart: start, PortEnd: end, Signer: signer, CertificateMount: Mount{Source: "certs", Target: "/certs"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func newPersistentReconciler(t *testing.T, client *fakeReconcileClient, store ReconcilerStateStore) *Reconciler {
+	t.Helper()
+	signer, err := proxy.NewSigner([]byte("test-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := NewReconciler(client, ReconcileConfig{MasterID: "master", ProxyImage: "proxy:test", PortStart: 21000, PortEnd: 21010, Signer: signer, CertificateMount: Mount{Source: "certs", Target: "/certs"}, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,13 +205,36 @@ func appSnapshot(id, router, service string) *controlv1.ApplicationSnapshot {
 }
 
 type fakeReconcileClient struct {
-	containers       []ManagedContainer
-	specs            []ContainerSpec
-	creates, removes int
+	containers              []ManagedContainer
+	specs                   []ContainerSpec
+	creates, removes, lists int
 }
 
 func (f *fakeReconcileClient) ListManaged(context.Context) ([]ManagedContainer, error) {
+	f.lists++
 	return append([]ManagedContainer(nil), f.containers...), nil
+}
+
+type fakeStateStore struct {
+	value *state.ReconcilerState
+	err   error
+}
+
+func (s *fakeStateStore) Load() (*state.ReconcilerState, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.value == nil {
+		return nil, os.ErrNotExist
+	}
+	return s.value, nil
+}
+func (s *fakeStateStore) Save(value *state.ReconcilerState) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.value = value
+	return nil
 }
 func (f *fakeReconcileClient) CreateManaged(_ context.Context, spec ContainerSpec) error {
 	f.creates++
