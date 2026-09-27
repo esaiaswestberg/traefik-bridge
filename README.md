@@ -1,59 +1,63 @@
 # Traefik Bridge
 
-Traefik Bridge exposes Docker applications on remote hosts through one public Traefik instance without replacing Traefik's Docker provider.
+Traefik Bridge exposes Docker applications on remote hosts through one public Traefik instance while keeping Traefik's standard Docker provider.
 
 ```text
-Internet -> Traefik (master host) -> generated bridge-proxy -> mTLS -> bridge-slave -> application
-                                      ^
-bridge-slave -------------------- mTLS control connection -----------------> bridge-master
+Internet -> Traefik (master) -> generated bridge-proxy -> mTLS -> bridge-slave -> application
+                                   ^
+bridge-slave ----------------- mTLS control connection ------------------> bridge-master
 ```
 
-The master creates local proxy containers carrying the application's normal Traefik labels. Traefik therefore discovers ordinary Docker routers and services; bridge traffic is only used behind Traefik.
+This guide deploys one master and one slave with Docker Compose and published GHCR images.
 
-## Before You Start
+## Requirements
 
-This guide deploys one master and one slave using published GHCR images. It requires direct private-network access between the hosts: a LAN, VPN, WireGuard, Tailscale, or equivalent.
+- Docker Engine and the Compose plugin on both hosts.
+- Direct LAN or VPN connectivity between master and slave. WireGuard, Tailscale, or a private VLAN are suitable.
+- A public Traefik instance on the master host.
+- DNS for application names pointing to Traefik on the master host.
 
-Do not expose bridge ports to the public internet.
+Do not route bridge traffic through the public internet. Restrict these private-network flows with your firewall:
 
 | Flow | Source | Destination | Port |
 | --- | --- | --- | --- |
-| Control and enrollment | Slave | Master | TCP 9443 and 9445 |
+| Control and development enrollment | Slave | Master | TCP 9443, 9445 |
 | Application traffic | Master | Slave | TCP 9444 |
-| Public traffic | Internet | Master Traefik | TCP 80 and 443 |
+| Public traffic | Internet | Master Traefik | TCP 80, 443 |
 
-The examples use these values. Replace them before running commands.
+The master Docker socket is mounted read-write and is root-equivalent access to the master host. The slave socket is mounted read-only, but exposes container metadata.
+
+## 1. Set Shared Values
+
+Set these values on both hosts. Use VPN/LAN addresses, not public addresses.
 
 ```sh
 export BRIDGE_TAG=nightly
 export BRIDGE_REGISTRY=ghcr.io/esaiaswestberg/traefik-bridge
+export BRIDGE_NETWORK=bridge-apps
 export MASTER_LAN=10.0.0.10
 export SLAVE_LAN=10.0.0.20
 export SLAVE_ID=remote-host-1
-export BRIDGE_NETWORK=bridge-apps
 ```
 
-`MASTER_LAN` and `SLAVE_LAN` must be addresses reachable directly through the LAN or VPN. Do not use public addresses when a private route is available.
-
-Install Docker Engine and the Compose plugin on both hosts before continuing. The master Docker socket is mounted read-write and is root-equivalent access to the master host. The slave socket is mounted read-only, but still exposes container metadata.
-
-## 1. Prepare Networks
-
-Run these commands on **both** hosts. The Docker networks are local to each host, but the names must match because the master uses the slave's selected network name when creating a proxy.
+Create the named network on **both** hosts. Its name must be identical because the master creates generated proxies on the network selected by the slave.
 
 ```sh
 docker network create "$BRIDGE_NETWORK" 2>/dev/null || true
 ```
 
-On the **master**, attach the running Traefik container to this network. Substitute your Traefik container name if necessary.
+Pull the relevant published images. If GHCR packages are private, log in first with a GitHub token that has `read:packages`.
 
 ```sh
-docker network connect "$BRIDGE_NETWORK" traefik 2>/dev/null || true
+docker pull "$BRIDGE_REGISTRY-master:$BRIDGE_TAG"
+docker pull "$BRIDGE_REGISTRY-proxy:$BRIDGE_TAG"
+# Run this on the slave too.
+docker pull "$BRIDGE_REGISTRY-slave:$BRIDGE_TAG"
 ```
 
-## 2. Create Master Secrets
+## 2. Configure The Master
 
-Run on the **master**. The route-signing key is shared with every slave. The enrollment secret is only for the development OPAQUE enrollment flow described below.
+Run these commands on the **master**.
 
 ```sh
 install -d -m 700 /srv/traefik-bridge/master /srv/traefik-bridge/secrets /srv/traefik-bridge/config
@@ -61,73 +65,90 @@ umask 077
 openssl rand -base64 48 > /srv/traefik-bridge/secrets/route.key
 openssl rand -base64 48 > /srv/traefik-bridge/secrets/enrollment.key
 chmod 600 /srv/traefik-bridge/secrets/*.key
-```
 
-Copy the Traefik transport definition from this repository to the master:
-
-```sh
 curl -fsSLo /srv/traefik-bridge/config/bridge-transport.yml \
   https://raw.githubusercontent.com/esaiaswestberg/traefik-bridge/main/deploy/traefik/bridge-transport.yml
 ```
 
-## 3. Start The Master
+Create `/srv/traefik-bridge/compose.master.yml`:
 
-Run on the **master**. Pull both the master and proxy images because the master starts proxy containers itself.
-
-```sh
-docker pull "$BRIDGE_REGISTRY-master:$BRIDGE_TAG"
-docker pull "$BRIDGE_REGISTRY-proxy:$BRIDGE_TAG"
-
-docker run -d --name bridge-master --restart unless-stopped \
-  -p 9443:8443 -p 9445:8445 \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v /srv/traefik-bridge/master:/bridge \
-  -v /srv/traefik-bridge/secrets/route.key:/run/secrets/route.key:ro \
-  -v /srv/traefik-bridge/secrets/enrollment.key:/run/secrets/enrollment.key:ro \
-  -e BRIDGE_PROXY_IMAGE="$BRIDGE_REGISTRY-proxy:$BRIDGE_TAG" \
-  -e BRIDGE_ROUTE_SIGNING_KEY_FILE=/run/secrets/route.key \
-  -e BRIDGE_PROXY_CERTIFICATE_MOUNT=/srv/traefik-bridge/master:/bridge \
-  -e BRIDGE_ENDPOINT_CIDRS="$SLAVE_LAN/32" \
-  -e BRIDGE_ENROLLMENT_ADDRESS=:8445 \
-  -e BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE=/run/secrets/enrollment.key \
-  -e BRIDGE_ROUTE_TOKEN_LIFETIME=5m \
-  -e BRIDGE_ROUTE_TOKEN_REFRESH_BEFORE=1m \
-  "$BRIDGE_REGISTRY-master:$BRIDGE_TAG"
+```yaml
+services:
+  bridge-master:
+    image: ${BRIDGE_REGISTRY}-master:${BRIDGE_TAG}
+    container_name: bridge-master
+    restart: unless-stopped
+    ports:
+      - "9443:8443"
+      - "9445:8445"
+    environment:
+      BRIDGE_PROXY_IMAGE: ${BRIDGE_REGISTRY}-proxy:${BRIDGE_TAG}
+      BRIDGE_ROUTE_SIGNING_KEY_FILE: /run/secrets/route.key
+      BRIDGE_PROXY_CERTIFICATE_MOUNT: /srv/traefik-bridge/master:/bridge
+      BRIDGE_ENDPOINT_CIDRS: ${SLAVE_LAN}/32
+      BRIDGE_ENROLLMENT_ADDRESS: :8445
+      BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE: /run/secrets/enrollment.key
+      BRIDGE_ROUTE_TOKEN_LIFETIME: 5m
+      BRIDGE_ROUTE_TOKEN_REFRESH_BEFORE: 1m
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /srv/traefik-bridge/master:/bridge
+      - /srv/traefik-bridge/secrets/route.key:/run/secrets/route.key:ro
+      - /srv/traefik-bridge/secrets/enrollment.key:/run/secrets/enrollment.key:ro
 ```
 
-The master creates these files in `/srv/traefik-bridge/master`:
+Create `/srv/traefik-bridge/.env`:
 
-- `ca.crt`
-- `master-client.crt`
-- `master-client.key`
-- private master and reconciler state files
+```dotenv
+BRIDGE_REGISTRY=ghcr.io/esaiaswestberg/traefik-bridge
+BRIDGE_TAG=nightly
+SLAVE_LAN=10.0.0.20
+```
 
-Check that it is ready:
+Start the master:
 
 ```sh
+docker compose --env-file /srv/traefik-bridge/.env \
+  -f /srv/traefik-bridge/compose.master.yml up -d
 docker exec bridge-master wget -q -O - http://localhost:8080/readyz
 ```
 
-## 4. Configure Traefik
+The master initializes its CA and exports `ca.crt`, `master-client.crt`, and `master-client.key` under `/srv/traefik-bridge/master`.
 
-Traefik needs the static file-provider transport named `bridge-mtls@file`, plus read-only access to the certificate files generated in the previous step.
+## 3. Attach Traefik To The Bridge
 
-For a Docker-managed Traefik container, add these arguments and mounts, then recreate Traefik:
+Run this on the **master** after the master is healthy:
 
-```text
---providers.file.filename=/etc/traefik/bridge-transport.yml
-
-/srv/traefik-bridge/config/bridge-transport.yml:/etc/traefik/bridge-transport.yml:ro
-/srv/traefik-bridge/master:/bridge:ro
+```sh
+docker network connect "$BRIDGE_NETWORK" traefik 2>/dev/null || true
 ```
 
-Keep Traefik attached to `$BRIDGE_NETWORK`. Do not enable `insecureSkipVerify`; the provided transport validates the slave mTLS certificate and supplies the master client certificate.
+Add the following to the existing Traefik service in its Compose file, then recreate Traefik. The names below assume the service is called `traefik`.
 
-## 5. Prepare Slave Enrollment Material
+```yaml
+services:
+  traefik:
+    command:
+      - --providers.file.filename=/etc/traefik/bridge-transport.yml
+    volumes:
+      - /srv/traefik-bridge/config/bridge-transport.yml:/etc/traefik/bridge-transport.yml:ro
+      - /srv/traefik-bridge/master:/bridge:ro
+    networks:
+      - bridge-apps
 
-The development enrollment flow uses RFC 9807 OPAQUE. Its Go implementation is not independently audited, so use the offline CSR workflow in [docs/installation.md](docs/installation.md) instead for production.
+networks:
+  bridge-apps:
+    external: true
+    name: bridge-apps
+```
 
-For development, run on the **master** to transfer the enrollment CA and the two required secrets over your authenticated private connection. Replace `slave.example.internal` with the slave's VPN/LAN SSH name or address.
+Preserve your existing Traefik command arguments, socket mount, public ports, ACME configuration, and networks. The file-provider transport is named `bridge-mtls@file`; generated services reference it automatically. Do not set `insecureSkipVerify`.
+
+## 4. Prepare The Slave
+
+The automatic enrollment flow is for development only because its OPAQUE implementation is not independently audited. For production, use the offline CSR workflow in [docs/installation.md](docs/installation.md) or an external PKI.
+
+For development, transfer the enrollment CA and shared secrets from the **master** to the **slave** through your authenticated private connection. Replace `slave.example.internal` with the slave's VPN/LAN SSH address.
 
 ```sh
 ssh root@slave.example.internal 'install -d -m 700 /srv/traefik-bridge/credentials'
@@ -141,95 +162,133 @@ cat /srv/traefik-bridge/master/ca.crt | \
 ssh root@slave.example.internal 'chmod 600 /srv/traefik-bridge/credentials/*'
 ```
 
-The slave creates `slave.key`, `slave.csr`, `slave.crt`, and `ca.crt` itself during first enrollment. It refuses to overwrite existing credentials.
+On the **slave**, create `/srv/traefik-bridge/compose.slave.yml`:
 
-## 6. Start The Slave
+```yaml
+services:
+  bridge-slave:
+    image: ${BRIDGE_REGISTRY}-slave:${BRIDGE_TAG}
+    container_name: bridge-slave
+    restart: unless-stopped
+    ports:
+      - "9444:8444"
+    environment:
+      BRIDGE_SLAVE_ID: ${SLAVE_ID}
+      BRIDGE_MASTER_ADDRESS: ${MASTER_LAN}:9443
+      BRIDGE_ENROLLMENT_ADDRESS: ${MASTER_LAN}:9445
+      BRIDGE_MASTER_SERVER_NAME: bridge-master
+      BRIDGE_DATA_ADDRESS: ${SLAVE_LAN}:9444
+      BRIDGE_DATA_LISTEN_ADDRESS: :8444
+      BRIDGE_DOCKER_NETWORK: ${BRIDGE_NETWORK}
+      BRIDGE_CA_FILE: /run/bridge/ca.crt
+      BRIDGE_CERTIFICATE_FILE: /run/bridge/slave.crt
+      BRIDGE_PRIVATE_KEY_FILE: /run/bridge/slave.key
+      BRIDGE_ROUTE_SIGNING_KEY_FILE: /run/bridge/route-signing.key
+      BRIDGE_ENROLLMENT_CA_FILE: /run/bridge/enrollment-ca.crt
+      BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE: /run/bridge/enrollment.key
+      BRIDGE_ENROLLMENT_CSR_FILE: /run/bridge/slave.csr
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Writable only for first enrollment; make this read-only afterward.
+      - /srv/traefik-bridge/credentials:/run/bridge
+    networks:
+      - bridge-apps
 
-Run on the **slave**.
-
-```sh
-docker pull "$BRIDGE_REGISTRY-slave:$BRIDGE_TAG"
-
-docker run -d --name bridge-slave --restart unless-stopped \
-  --network "$BRIDGE_NETWORK" \
-  -p 9444:8444 \
-  -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  -v /srv/traefik-bridge/credentials:/run/bridge \
-  -e BRIDGE_SLAVE_ID="$SLAVE_ID" \
-  -e BRIDGE_MASTER_ADDRESS="$MASTER_LAN:9443" \
-  -e BRIDGE_ENROLLMENT_ADDRESS="$MASTER_LAN:9445" \
-  -e BRIDGE_MASTER_SERVER_NAME=bridge-master \
-  -e BRIDGE_DATA_ADDRESS="$SLAVE_LAN:9444" \
-  -e BRIDGE_DATA_LISTEN_ADDRESS=:8444 \
-  -e BRIDGE_DOCKER_NETWORK="$BRIDGE_NETWORK" \
-  -e BRIDGE_CA_FILE=/run/bridge/ca.crt \
-  -e BRIDGE_CERTIFICATE_FILE=/run/bridge/slave.crt \
-  -e BRIDGE_PRIVATE_KEY_FILE=/run/bridge/slave.key \
-  -e BRIDGE_ROUTE_SIGNING_KEY_FILE=/run/bridge/route-signing.key \
-  -e BRIDGE_ENROLLMENT_CA_FILE=/run/bridge/enrollment-ca.crt \
-  -e BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE=/run/bridge/enrollment.key \
-  -e BRIDGE_ENROLLMENT_CSR_FILE=/run/bridge/slave.csr \
-  "$BRIDGE_REGISTRY-slave:$BRIDGE_TAG"
+networks:
+  bridge-apps:
+    external: true
+    name: ${BRIDGE_NETWORK}
 ```
 
-Verify enrollment and control connectivity:
+Create `/srv/traefik-bridge/.env` on the **slave**:
+
+```dotenv
+BRIDGE_REGISTRY=ghcr.io/esaiaswestberg/traefik-bridge
+BRIDGE_TAG=nightly
+BRIDGE_NETWORK=bridge-apps
+MASTER_LAN=10.0.0.10
+SLAVE_LAN=10.0.0.20
+SLAVE_ID=remote-host-1
+```
+
+Start the slave:
 
 ```sh
+docker compose --env-file /srv/traefik-bridge/.env \
+  -f /srv/traefik-bridge/compose.slave.yml up -d
 docker logs bridge-slave
 docker exec bridge-slave wget -q -O - http://localhost:8080/readyz
-ls -l /srv/traefik-bridge/credentials
 ```
 
-After first enrollment, recreate `bridge-slave` with the credential mount changed to `-v /srv/traefik-bridge/credentials:/run/bridge:ro`. The initial writable mount is required only because enrollment creates the key, CSR, CA, and certificate files.
+First enrollment creates `slave.key`, `slave.csr`, `slave.crt`, and `ca.crt`. Once the slave is healthy, change the credential volume to `- /srv/traefik-bridge/credentials:/run/bridge:ro` and run `docker compose ... up -d` again.
 
-## 7. Run A Remote Application
+## 5. Publish A Remote Application
 
-Run this on the **slave** to expose Whoami through the master. Replace `whoami.example.com` with a DNS name pointing at the master Traefik instance. The labels are standard Traefik Docker labels.
+Create `/srv/traefik-bridge/compose.whoami.yml` on the **slave**. Replace `whoami.example.com` with a name that resolves to the master Traefik instance.
+
+```yaml
+services:
+  whoami:
+    image: traefik/whoami:v1.11
+    restart: unless-stopped
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.whoami.rule: Host(`whoami.example.com`)
+      traefik.http.routers.whoami.entrypoints: websecure
+      traefik.http.routers.whoami.tls.certresolver: letsencrypt
+      traefik.http.services.whoami.loadbalancer.server.port: "80"
+    networks:
+      - bridge-apps
+
+networks:
+  bridge-apps:
+    external: true
+    name: ${BRIDGE_NETWORK}
+```
+
+Start it on the slave:
 
 ```sh
-docker run -d --name whoami --restart unless-stopped \
-  --network "$BRIDGE_NETWORK" \
-  --label traefik.enable=true \
-  --label 'traefik.http.routers.whoami.rule=Host(`whoami.example.com`)' \
-  --label traefik.http.routers.whoami.entrypoints=websecure \
-  --label traefik.http.routers.whoami.tls.certresolver=letsencrypt \
-  --label traefik.http.services.whoami.loadbalancer.server.port=80 \
-  traefik/whoami:v1.11
+docker compose --env-file /srv/traefik-bridge/.env \
+  -f /srv/traefik-bridge/compose.whoami.yml up -d
 ```
 
-The master creates a `traefik-bridge-*` proxy container. Traefik reads the copied labels and routes to its assigned local listener. The proxy then uses mTLS to reach the slave.
+The master detects the labels, creates a local `traefik-bridge-*` proxy, and Traefik discovers its normal Docker labels.
 
-## 8. Verify End To End
+## 6. Verify
 
-From a client that can resolve the public name:
+From a public client:
 
 ```sh
 curl --fail https://whoami.example.com
 ```
 
-The response should show the hostname and IP address of the **slave** Whoami container. On the master, inspect the generated proxy and master readiness:
+The response should identify the Whoami container on the slave. On the master, verify the generated proxy and readiness:
 
 ```sh
 docker ps --filter label=traefik.bridge.owner=true
 docker exec bridge-master wget -q -O - http://localhost:8080/readyz
 ```
 
-## Updating Images
+## Updating
 
-Use `nightly` for the newest `main` build, or pin a release tag for a stable deployment. Pull the required image, then recreate the affected container. The master must always have the matching proxy image locally.
+Set `BRIDGE_TAG` to a release tag in both `.env` files, pull the matching images, then recreate the services. The master must always have the proxy image with the same tag as its own image.
 
 ```sh
-docker pull "$BRIDGE_REGISTRY-master:<release-tag>"
-docker pull "$BRIDGE_REGISTRY-proxy:<release-tag>"
-docker pull "$BRIDGE_REGISTRY-slave:<release-tag>"
+docker compose --env-file /srv/traefik-bridge/.env \
+  -f /srv/traefik-bridge/compose.master.yml pull
+docker compose --env-file /srv/traefik-bridge/.env \
+  -f /srv/traefik-bridge/compose.master.yml up -d
 ```
 
-## Security Notes
+Apply the corresponding commands to `compose.slave.yml` on the slave.
 
-- Restrict TCP 9443 and 9445 on the master to slave VPN/LAN addresses only.
-- Restrict TCP 9444 on each slave to master VPN/LAN addresses only.
-- Keep `/srv/traefik-bridge/secrets`, `/srv/traefik-bridge/master`, and slave credential directories private and backed up appropriately.
-- The master Docker socket mount is root-equivalent. Do not expose Docker's API over TCP.
-- Development OPAQUE enrollment is unaudited. Use offline certificate provisioning or an external PKI for production.
+## Security
+
+- Allow TCP 9443 and 9445 on the master only from slave LAN/VPN addresses.
+- Allow TCP 9444 on every slave only from master LAN/VPN addresses.
+- Keep `/srv/traefik-bridge/secrets`, `/srv/traefik-bridge/master`, and slave credentials private and backed up.
+- Never expose Docker's API over TCP.
+- Development OPAQUE enrollment is unaudited; use offline provisioning or an external PKI in production.
 
 See [installation details](docs/installation.md), [security guidance](docs/security.md), and [the Compose example](examples/two-host/README.md) for additional options.
