@@ -57,7 +57,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		if readErr != nil {
 			return fmt.Errorf("read enrollment CA: %w", readErr)
 		}
-		pair, ca, _, err = bridgecontrol.Enroll(ctx, bridgecontrol.EnrollmentClientConfig{Address: cfg.EnrollmentAddress, ServerName: cfg.MasterServerName, BootstrapCA: bootstrapCA, Secret: secret, SlaveID: cfg.SlaveID, CertificateFile: cfg.CertificateFile, PrivateKeyFile: cfg.PrivateKeyFile, CAFile: cfg.CAFile, CSRFile: cfg.EnrollmentCSRFile})
+		pair, ca, _, err = bridgecontrol.Enroll(ctx, bridgecontrol.EnrollmentClientConfig{Address: cfg.EnrollmentAddress, ServerName: cfg.MasterServerName, DataHost: dataHost(cfg.DataAddress), BootstrapCA: bootstrapCA, Secret: secret, SlaveID: cfg.SlaveID, CertificateFile: cfg.CertificateFile, PrivateKeyFile: cfg.PrivateKeyFile, CAFile: cfg.CAFile, CSRFile: cfg.EnrollmentCSRFile})
 		if err != nil {
 			return fmt.Errorf("development enrollment: %w", err)
 		}
@@ -195,6 +195,14 @@ func dataTLSConfig(pair state.KeyPair, ca []byte) (*tls.Config, error) {
 		return nil, errors.New("invalid bridge CA certificate")
 	}
 	return proxy.ServerTLSConfig(certificate, pool), nil
+}
+
+func dataHost(address string) string {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return address
+	}
+	return host
 }
 
 func serve(errs chan<- error, name string, serve func() error) {

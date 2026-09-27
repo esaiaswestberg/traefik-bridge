@@ -109,6 +109,7 @@ func validateEnrollmentCSR(csrDER []byte) error {
 type EnrollmentClientConfig struct {
 	Address         string
 	ServerName      string
+	DataHost        string
 	BootstrapCA     []byte
 	Secret          []byte
 	SlaveID         string
@@ -132,7 +133,13 @@ func Enroll(ctx context.Context, config EnrollmentClientConfig) (state.KeyPair, 
 	if err != nil {
 		return state.KeyPair{}, nil, "", fmt.Errorf("generate slave key: %w", err)
 	}
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: config.SlaveID}}, key)
+	request := &x509.CertificateRequest{Subject: pkix.Name{CommonName: config.SlaveID}}
+	if ip := net.ParseIP(config.DataHost); ip != nil {
+		request.IPAddresses = []net.IP{ip}
+	} else if config.DataHost != "" {
+		request.DNSNames = []string{config.DataHost}
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, request, key)
 	if err != nil {
 		return state.KeyPair{}, nil, "", fmt.Errorf("create slave CSR: %w", err)
 	}
