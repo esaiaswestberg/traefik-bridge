@@ -4,8 +4,8 @@ http:
   serversTransports:
     bridge-mtls:
       rootCAs:
-        - /bridge/certs/ca.crt
+        - /bridge/ca.crt
       certificates:
-        - certFile: /bridge/certs/master-client.crt
-          keyFile: /bridge/certs/master-client.key
+        - certFile: /bridge/master-client.crt
+          keyFile: /bridge/master-client.key
       insecureSkipVerify: false
