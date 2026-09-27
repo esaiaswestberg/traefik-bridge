@@ -1,4 +1,7 @@
-FROM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -6,8 +9,8 @@ RUN go mod download
 COPY api ./api
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/bridge-master ./cmd/bridge-master
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/bridge-provision ./cmd/bridge-provision
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags='-s -w' -o /out/bridge-master ./cmd/bridge-master
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags='-s -w' -o /out/bridge-provision ./cmd/bridge-provision
 
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates
