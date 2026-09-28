@@ -8,7 +8,7 @@ Internet -> Traefik (master) -> generated bridge-proxy -> mTLS -> bridge-slave -
 bridge-slave ----------------- mTLS control connection ------------------> bridge-master
 ```
 
-This guide deploys one master and one slave with Docker Compose and published GHCR images.
+For complete deployment instructions, including Docker Compose, Docker CLI, and Portainer methods, see the [deployment guide](docs/setup.md).
 
 ## Requirements
 
