@@ -27,14 +27,11 @@ Do not route bridge traffic through the public internet. Restrict these private-
 
 The master Docker socket is mounted read-write and is root-equivalent access to the master host. The slave socket is mounted read-only, but exposes container metadata.
 
-## 1. Set Shared Values
+## 1. Set Host Values
 
-Set these values on both hosts. Use VPN/LAN addresses, not public addresses.
+Set these values on both hosts. Use VPN/LAN addresses, not public addresses. All other values in this guide are static and used literally, including the image names and the `traefik-bridge` Docker network.
 
 ```sh
-export BRIDGE_TAG=nightly
-export BRIDGE_REGISTRY=ghcr.io/esaiaswestberg/traefik-bridge
-export BRIDGE_NETWORK=bridge-apps
 export MASTER_LAN=10.0.0.10
 export SLAVE_LAN=10.0.0.20
 export SLAVE_ID=remote-host-1
@@ -43,16 +40,16 @@ export SLAVE_ID=remote-host-1
 Create the named network on **both** hosts. Its name must be identical because the master creates generated proxies on the network selected by the slave.
 
 ```sh
-docker network create "$BRIDGE_NETWORK" 2>/dev/null || true
+docker network create "traefik-bridge" 2>/dev/null || true
 ```
 
-Pull the relevant published images. If GHCR packages are private, log in first with a GitHub token that has `read:packages`.
+Pull the published images. If GHCR packages are private, log in first with a GitHub token that has `read:packages`.
 
 ```sh
-docker pull "$BRIDGE_REGISTRY-master:$BRIDGE_TAG"
-docker pull "$BRIDGE_REGISTRY-proxy:$BRIDGE_TAG"
+docker pull ghcr.io/esaiaswestberg/traefik-bridge-master:latest
+docker pull ghcr.io/esaiaswestberg/traefik-bridge-proxy:latest
 # Run this on the slave too.
-docker pull "$BRIDGE_REGISTRY-slave:$BRIDGE_TAG"
+docker pull ghcr.io/esaiaswestberg/traefik-bridge-slave:latest
 ```
 
 ## 2. Configure The Master
@@ -75,14 +72,14 @@ Create `/srv/traefik-bridge/compose.master.yml`:
 ```yaml
 services:
   bridge-master:
-    image: ${BRIDGE_REGISTRY}-master:${BRIDGE_TAG}
+    image: ghcr.io/esaiaswestberg/traefik-bridge-master:latest
     container_name: bridge-master
     restart: unless-stopped
     ports:
       - "9443:8443"
       - "9445:8445"
     environment:
-      BRIDGE_PROXY_IMAGE: ${BRIDGE_REGISTRY}-proxy:${BRIDGE_TAG}
+      BRIDGE_PROXY_IMAGE: ghcr.io/esaiaswestberg/traefik-bridge-proxy:latest
       BRIDGE_ROUTE_SIGNING_KEY_FILE: /run/secrets/route.key
       BRIDGE_PROXY_CERTIFICATE_MOUNT: /srv/traefik-bridge/master:/bridge
       BRIDGE_ENDPOINT_CIDRS: ${SLAVE_LAN}/32
@@ -100,8 +97,6 @@ services:
 Create `/srv/traefik-bridge/.env`:
 
 ```dotenv
-BRIDGE_REGISTRY=ghcr.io/esaiaswestberg/traefik-bridge
-BRIDGE_TAG=nightly
 SLAVE_LAN=10.0.0.20
 ```
 
@@ -120,7 +115,7 @@ The master initializes its CA and exports `ca.crt`, `master-client.crt`, and `ma
 Run this on the **master** after the master is healthy:
 
 ```sh
-docker network connect "$BRIDGE_NETWORK" traefik 2>/dev/null || true
+docker network connect "traefik-bridge" traefik 2>/dev/null || true
 ```
 
 Add the following to the existing Traefik service in its Compose file, then recreate Traefik. The names below assume the service is called `traefik`.
@@ -134,12 +129,12 @@ services:
       - /srv/traefik-bridge/config/bridge-transport.yml:/etc/traefik/bridge-transport.yml:ro
       - /srv/traefik-bridge/master:/bridge:ro
     networks:
-      - bridge-apps
+      - traefik-bridge
 
 networks:
-  bridge-apps:
+  traefik-bridge:
     external: true
-    name: bridge-apps
+    name: traefik-bridge
 ```
 
 Preserve your existing Traefik command arguments, socket mount, public ports, ACME configuration, and networks. The file-provider transport is named `bridge-mtls@file`; generated services reference it automatically. Do not set `insecureSkipVerify`.
@@ -167,7 +162,7 @@ On the **slave**, create `/srv/traefik-bridge/compose.slave.yml`:
 ```yaml
 services:
   bridge-slave:
-    image: ${BRIDGE_REGISTRY}-slave:${BRIDGE_TAG}
+    image: ghcr.io/esaiaswestberg/traefik-bridge-slave:latest
     container_name: bridge-slave
     restart: unless-stopped
     ports:
@@ -179,7 +174,7 @@ services:
       BRIDGE_MASTER_SERVER_NAME: bridge-master
       BRIDGE_DATA_ADDRESS: ${SLAVE_LAN}:9444
       BRIDGE_DATA_LISTEN_ADDRESS: :8444
-      BRIDGE_DOCKER_NETWORK: ${BRIDGE_NETWORK}
+      BRIDGE_DOCKER_NETWORK: traefik-bridge
       BRIDGE_CA_FILE: /run/bridge/ca.crt
       BRIDGE_CERTIFICATE_FILE: /run/bridge/slave.crt
       BRIDGE_PRIVATE_KEY_FILE: /run/bridge/slave.key
@@ -192,20 +187,17 @@ services:
       # Writable only for first enrollment; make this read-only afterward.
       - /srv/traefik-bridge/credentials:/run/bridge
     networks:
-      - bridge-apps
+      - traefik-bridge
 
 networks:
-  bridge-apps:
+  traefik-bridge:
     external: true
-    name: ${BRIDGE_NETWORK}
+    name: traefik-bridge
 ```
 
 Create `/srv/traefik-bridge/.env` on the **slave**:
 
 ```dotenv
-BRIDGE_REGISTRY=ghcr.io/esaiaswestberg/traefik-bridge
-BRIDGE_TAG=nightly
-BRIDGE_NETWORK=bridge-apps
 MASTER_LAN=10.0.0.10
 SLAVE_LAN=10.0.0.20
 SLAVE_ID=remote-host-1
@@ -238,19 +230,18 @@ services:
       traefik.http.routers.whoami.tls.certresolver: letsencrypt
       traefik.http.services.whoami.loadbalancer.server.port: "80"
     networks:
-      - bridge-apps
+      - traefik-bridge
 
 networks:
-  bridge-apps:
+  traefik-bridge:
     external: true
-    name: ${BRIDGE_NETWORK}
+    name: traefik-bridge
 ```
 
 Start it on the slave:
 
 ```sh
-docker compose --env-file /srv/traefik-bridge/.env \
-  -f /srv/traefik-bridge/compose.whoami.yml up -d
+docker compose -f /srv/traefik-bridge/compose.whoami.yml up -d
 ```
 
 The master detects the labels, creates a local `traefik-bridge-*` proxy, and Traefik discovers its normal Docker labels.
@@ -272,16 +263,18 @@ docker exec bridge-master wget -q -O - http://localhost:8080/readyz
 
 ## Updating
 
-Set `BRIDGE_TAG` to a release tag in both `.env` files, pull the matching images, then recreate the services. The master must always have the proxy image with the same tag as its own image.
+The Compose files use `latest` for convenience. For a stable deployment, replace `:latest` with a release tag in every image reference on both hosts. The master and generated proxy images must always use the same tag.
 
 ```sh
+# Example: pin all images to v0.1.0 on both hosts.
+sed -i 's/:latest/:v0.1.0/' /srv/traefik-bridge/compose.master.yml
 docker compose --env-file /srv/traefik-bridge/.env \
   -f /srv/traefik-bridge/compose.master.yml pull
 docker compose --env-file /srv/traefik-bridge/.env \
   -f /srv/traefik-bridge/compose.master.yml up -d
 ```
 
-Apply the corresponding commands to `compose.slave.yml` on the slave.
+Apply the same commands to `compose.slave.yml` on the slave.
 
 ## Security
 
