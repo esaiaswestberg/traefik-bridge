@@ -5,8 +5,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
@@ -202,6 +204,37 @@ type Enrollment struct {
 	record        *opaque.ClientRecord
 }
 
+const pairingCodePrefix = "bridge-pair-v1"
+
+// PairingCode contains the secret used by OPAQUE and the expected SHA-256
+// digest of the master's enrollment certificate SPKI.
+type PairingCode struct {
+	Secret  []byte
+	SPKIPin []byte
+}
+
+// String serializes the code for transport through an environment variable.
+func (c PairingCode) String() string {
+	return pairingCodePrefix + "." + base64.RawURLEncoding.EncodeToString(c.Secret) + "." + base64.RawURLEncoding.EncodeToString(c.SPKIPin)
+}
+
+// ParsePairingCode validates a development pairing code.
+func ParsePairingCode(value string) (PairingCode, error) {
+	parts := strings.Split(strings.TrimSpace(value), ".")
+	if len(parts) != 3 || parts[0] != pairingCodePrefix {
+		return PairingCode{}, errors.New("invalid development pairing code")
+	}
+	secret, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || len(secret) != 32 {
+		return PairingCode{}, errors.New("invalid development pairing code secret")
+	}
+	pin, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil || len(pin) != sha256.Size {
+		return PairingCode{}, errors.New("invalid development pairing code SPKI pin")
+	}
+	return PairingCode{Secret: secret, SPKIPin: pin}, nil
+}
+
 // InitializeEnrollment loads or creates the OPAQUE record derived locally
 // from secret. The secret is never serialized or sent over the network.
 func (a *Authority) InitializeEnrollment(secret []byte) (*Enrollment, error) {
@@ -215,6 +248,39 @@ func (a *Authority) InitializeEnrollment(secret []byte) (*Enrollment, error) {
 			return nil, err
 		}
 	}
+	return a.enrollmentLocked()
+}
+
+// RotateEnrollment replaces the OPAQUE registration and returns its one-time
+// pairing code. Callers must stop using the previous Enrollment before calling it.
+func (a *Authority) RotateEnrollment() (*Enrollment, string, error) {
+	secret, err := randomBytes(32)
+	if err != nil {
+		return nil, "", err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.createEnrollment(secret); err != nil {
+		return nil, "", err
+	}
+	enrollment, err := a.enrollmentLocked()
+	if err != nil {
+		return nil, "", err
+	}
+	pair := a.MasterServer()
+	block, _ := pem.Decode(pair.CertificatePEM)
+	if block == nil {
+		return nil, "", errors.New("invalid master enrollment certificate")
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse master enrollment certificate: %w", err)
+	}
+	pin := sha256.Sum256(certificate.RawSubjectPublicKeyInfo)
+	return enrollment, (PairingCode{Secret: secret, SPKIPin: pin[:]}).String(), nil
+}
+
+func (a *Authority) enrollmentLocked() (*Enrollment, error) {
 	configuration, err := opaque.DeserializeConfiguration(a.state.Enrollment.Configuration)
 	if err != nil {
 		return nil, fmt.Errorf("decode OPAQUE configuration: %w", err)

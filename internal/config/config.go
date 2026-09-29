@@ -33,23 +33,24 @@ type Master struct {
 
 // Slave configures the bridge slave runtime.
 type Slave struct {
-	MasterAddress        string
-	EnrollmentAddress    string
-	MasterServerName     string
-	DataAddress          string
-	DataListenAddress    string
-	ObservabilityAddress string
-	DockerHost           string
-	DefaultNetwork       string
-	SlaveID              string
-	CAFile               string
-	CertificateFile      string
-	PrivateKeyFile       string
-	RouteSigningKeyFile  string
-	ConstraintLabels     map[string]string
-	EnrollmentCAFile     string
-	EnrollmentSecretFile string
-	EnrollmentCSRFile    string
+	MasterAddress          string
+	EnrollmentAddress      string
+	MasterServerName       string
+	DataAddress            string
+	DataListenAddress      string
+	ObservabilityAddress   string
+	DockerHost             string
+	DefaultNetwork         string
+	SlaveID                string
+	CAFile                 string
+	CertificateFile        string
+	PrivateKeyFile         string
+	RouteSigningKeyFile    string
+	ConstraintLabels       map[string]string
+	EnrollmentCAFile       string
+	EnrollmentSecretFile   string
+	EnrollmentCSRFile      string
+	DevelopmentPairingCode string
 }
 
 // Proxy configures one generated bridge proxy.
@@ -131,22 +132,23 @@ func loadMaster(getenv func(string) string) (Master, error) {
 
 func loadSlave(getenv func(string) string) (Slave, error) {
 	config := Slave{
-		MasterAddress:        strings.TrimSpace(getenv("BRIDGE_MASTER_ADDRESS")),
-		EnrollmentAddress:    value(getenv, "BRIDGE_ENROLLMENT_ADDRESS", getenv("BRIDGE_MASTER_ADDRESS")),
-		MasterServerName:     value(getenv, "BRIDGE_MASTER_SERVER_NAME", "bridge-master"),
-		DataAddress:          strings.TrimSpace(getenv("BRIDGE_DATA_ADDRESS")),
-		DataListenAddress:    value(getenv, "BRIDGE_DATA_LISTEN_ADDRESS", getenv("BRIDGE_DATA_ADDRESS")),
-		ObservabilityAddress: value(getenv, "BRIDGE_OBSERVABILITY_ADDRESS", ":8080"),
-		DockerHost:           value(getenv, "BRIDGE_DOCKER_HOST", defaultDockerHost),
-		DefaultNetwork:       strings.TrimSpace(getenv("BRIDGE_DOCKER_NETWORK")),
-		SlaveID:              strings.TrimSpace(getenv("BRIDGE_SLAVE_ID")),
-		CAFile:               strings.TrimSpace(getenv("BRIDGE_CA_FILE")),
-		CertificateFile:      strings.TrimSpace(getenv("BRIDGE_CERTIFICATE_FILE")),
-		PrivateKeyFile:       strings.TrimSpace(getenv("BRIDGE_PRIVATE_KEY_FILE")),
-		RouteSigningKeyFile:  strings.TrimSpace(getenv("BRIDGE_ROUTE_SIGNING_KEY_FILE")),
-		EnrollmentCAFile:     strings.TrimSpace(getenv("BRIDGE_ENROLLMENT_CA_FILE")),
-		EnrollmentSecretFile: strings.TrimSpace(getenv("BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE")),
-		EnrollmentCSRFile:    strings.TrimSpace(getenv("BRIDGE_ENROLLMENT_CSR_FILE")),
+		MasterAddress:          strings.TrimSpace(getenv("BRIDGE_MASTER_ADDRESS")),
+		EnrollmentAddress:      value(getenv, "BRIDGE_ENROLLMENT_ADDRESS", getenv("BRIDGE_MASTER_ADDRESS")),
+		MasterServerName:       value(getenv, "BRIDGE_MASTER_SERVER_NAME", "bridge-master"),
+		DataAddress:            strings.TrimSpace(getenv("BRIDGE_DATA_ADDRESS")),
+		DataListenAddress:      value(getenv, "BRIDGE_DATA_LISTEN_ADDRESS", getenv("BRIDGE_DATA_ADDRESS")),
+		ObservabilityAddress:   value(getenv, "BRIDGE_OBSERVABILITY_ADDRESS", ":8080"),
+		DockerHost:             value(getenv, "BRIDGE_DOCKER_HOST", defaultDockerHost),
+		DefaultNetwork:         strings.TrimSpace(getenv("BRIDGE_DOCKER_NETWORK")),
+		SlaveID:                strings.TrimSpace(getenv("BRIDGE_SLAVE_ID")),
+		CAFile:                 strings.TrimSpace(getenv("BRIDGE_CA_FILE")),
+		CertificateFile:        strings.TrimSpace(getenv("BRIDGE_CERTIFICATE_FILE")),
+		PrivateKeyFile:         strings.TrimSpace(getenv("BRIDGE_PRIVATE_KEY_FILE")),
+		RouteSigningKeyFile:    strings.TrimSpace(getenv("BRIDGE_ROUTE_SIGNING_KEY_FILE")),
+		EnrollmentCAFile:       strings.TrimSpace(getenv("BRIDGE_ENROLLMENT_CA_FILE")),
+		EnrollmentSecretFile:   strings.TrimSpace(getenv("BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE")),
+		EnrollmentCSRFile:      strings.TrimSpace(getenv("BRIDGE_ENROLLMENT_CSR_FILE")),
+		DevelopmentPairingCode: strings.TrimSpace(getenv("BRIDGE_DEVELOPMENT_PAIRING_CODE")),
 	}
 	if config.MasterAddress == "" {
 		return Slave{}, errors.New("BRIDGE_MASTER_ADDRESS is required")
@@ -177,10 +179,10 @@ func loadSlave(getenv func(string) string) (Slave, error) {
 			return Slave{}, errors.New("BRIDGE_CA_FILE, BRIDGE_CERTIFICATE_FILE, and BRIDGE_PRIVATE_KEY_FILE are required")
 		}
 	}
-	if config.EnrollmentSecretFile != "" && config.EnrollmentCAFile == "" {
+	if config.DevelopmentPairingCode == "" && config.EnrollmentSecretFile != "" && config.EnrollmentCAFile == "" {
 		return Slave{}, errors.New("BRIDGE_ENROLLMENT_CA_FILE is required with development enrollment")
 	}
-	if config.EnrollmentSecretFile != "" && config.EnrollmentCSRFile == "" {
+	if (config.EnrollmentSecretFile != "" || config.DevelopmentPairingCode != "") && config.EnrollmentCSRFile == "" {
 		return Slave{}, errors.New("BRIDGE_ENROLLMENT_CSR_FILE is required with development enrollment")
 	}
 	constraints, err := labels(getenv("BRIDGE_CONSTRAINT_LABELS"))

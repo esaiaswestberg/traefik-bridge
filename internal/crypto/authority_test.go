@@ -110,6 +110,27 @@ func TestIssueSlavePersistsTrackedCertificate(t *testing.T) {
 	}
 }
 
+func TestPairingCodeRoundTrip(t *testing.T) {
+	authority, err := Initialize(state.NewStore(filepath.Join(t.TempDir(), "master")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, code, err := authority.RotateEnrollment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParsePairingCode(code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Secret) != 32 || len(parsed.SPKIPin) != 32 || parsed.String() != code {
+		t.Fatalf("invalid pairing code round trip: %#v", parsed)
+	}
+	if _, err := ParsePairingCode("bridge-pair-v1.bad.code"); err == nil {
+		t.Fatal("accepted malformed pairing code")
+	}
+}
+
 func newCSR(t *testing.T, commonName string) []byte {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

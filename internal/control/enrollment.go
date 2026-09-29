@@ -5,6 +5,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -14,6 +16,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/bytemare/opaque"
 	controlv1 "github.com/traefik/traefik-bridge/api/gen/go/control/v1"
@@ -31,6 +34,22 @@ type EnrollmentServer struct {
 	controlv1.UnimplementedEnrollmentServiceServer
 	authority  *bridgecrypto.Authority
 	enrollment *bridgecrypto.Enrollment
+	rotate     bool
+	onRotate   func(string)
+	mu         sync.Mutex
+}
+
+// NewPairingEnrollmentServer starts a development pairing session and returns
+// the code which a slave must use to bootstrap TLS and OPAQUE.
+func NewPairingEnrollmentServer(authority *bridgecrypto.Authority, onRotate func(string)) (*EnrollmentServer, string, error) {
+	if authority == nil {
+		return nil, "", errors.New("certificate authority is required")
+	}
+	enrollment, code, err := authority.RotateEnrollment()
+	if err != nil {
+		return nil, "", err
+	}
+	return &EnrollmentServer{authority: authority, enrollment: enrollment, rotate: true, onRotate: onRotate}, code, nil
 }
 
 func NewEnrollmentServer(authority *bridgecrypto.Authority, secret []byte) (*EnrollmentServer, error) {
@@ -59,6 +78,8 @@ func (s *EnrollmentServer) TLSConfig() (*tls.Config, error) {
 }
 
 func (s *EnrollmentServer) Enroll(stream controlv1.EnrollmentService_EnrollServer) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	first, err := stream.Recv()
 	if err != nil {
 		return err
@@ -94,7 +115,20 @@ func (s *EnrollmentServer) Enroll(stream controlv1.EnrollmentService_EnrollServe
 	if err != nil {
 		return status.Error(codes.Internal, "issue slave certificate: "+err.Error())
 	}
-	return stream.Send(&controlv1.EnrollmentResponse{EnrollmentId: first.GetEnrollmentId(), Result: &controlv1.EnrollmentResponse_Accepted{Accepted: &controlv1.EnrollmentAccepted{SlaveId: slaveID, Certificate: &controlv1.CertificateBundle{LeafCertificatePem: issued.CertificatePEM}, MasterCaPem: s.authority.CACertificate()}}})
+	if err := stream.Send(&controlv1.EnrollmentResponse{EnrollmentId: first.GetEnrollmentId(), Result: &controlv1.EnrollmentResponse_Accepted{Accepted: &controlv1.EnrollmentAccepted{SlaveId: slaveID, Certificate: &controlv1.CertificateBundle{LeafCertificatePem: issued.CertificatePEM}, MasterCaPem: s.authority.CACertificate()}}}); err != nil {
+		return err
+	}
+	if s.rotate {
+		next, code, err := s.authority.RotateEnrollment()
+		if err != nil {
+			return status.Error(codes.Internal, "rotate development pairing code: "+err.Error())
+		}
+		s.enrollment = next
+		if s.onRotate != nil {
+			s.onRotate(code)
+		}
+	}
+	return nil
 }
 
 func validateEnrollmentCSR(csrDER []byte) error {
@@ -112,17 +146,29 @@ type EnrollmentClientConfig struct {
 	DataHost        string
 	BootstrapCA     []byte
 	Secret          []byte
+	PairingCode     string
 	SlaveID         string
 	CertificateFile string
 	PrivateKeyFile  string
 	CAFile          string
 	CSRFile         string
 	DialContext     func(context.Context, string) (net.Conn, error)
+	pinnedSPKI      []byte
 }
 
 // Enroll creates a private key and CSR, mutually authenticates with OPAQUE,
 // and atomically persists the issued credentials. Existing files are refused.
 func Enroll(ctx context.Context, config EnrollmentClientConfig) (state.KeyPair, []byte, string, error) {
+	if config.PairingCode != "" {
+		pairing, err := bridgecrypto.ParsePairingCode(config.PairingCode)
+		if err != nil {
+			return state.KeyPair{}, nil, "", err
+		}
+		config.Secret = pairing.Secret
+		config.BootstrapCA = nil
+		config.ServerName = ""
+		config.pinnedSPKI = pairing.SPKIPin
+	}
 	if len(config.Secret) < 32 {
 		return state.KeyPair{}, nil, "", errors.New("development enrollment secret must contain at least 32 bytes")
 	}
@@ -147,9 +193,6 @@ func Enroll(ctx context.Context, config EnrollmentClientConfig) (state.KeyPair, 
 	if err != nil {
 		return state.KeyPair{}, nil, "", err
 	}
-	if err := persistPrivateMaterial(config.PrivateKeyFile, config.CSRFile, pemEncodePrivateKey(keyDER), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})); err != nil {
-		return state.KeyPair{}, nil, "", err
-	}
 	configuration := opaque.DefaultConfiguration()
 	client, err := configuration.Client()
 	if err != nil {
@@ -164,11 +207,11 @@ func Enroll(ctx context.Context, config EnrollmentClientConfig) (state.KeyPair, 
 	if err != nil {
 		return state.KeyPair{}, nil, "", err
 	}
-	pool, err := certificatePool(config.BootstrapCA)
+	tlsConfig, err := enrollmentTLSConfig(config.BootstrapCA, config.ServerName, config.pinnedSPKI)
 	if err != nil {
-		return state.KeyPair{}, nil, "", fmt.Errorf("load enrollment CA: %w", err)
+		return state.KeyPair{}, nil, "", err
 	}
-	dialOptions := []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{RootCAs: pool, ServerName: config.ServerName, MinVersion: tls.VersionTLS13}))}
+	dialOptions := []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))}
 	if config.DialContext != nil {
 		dialOptions = append(dialOptions, grpc.WithContextDialer(config.DialContext))
 	}
@@ -208,10 +251,37 @@ func Enroll(ctx context.Context, config EnrollmentClientConfig) (state.KeyPair, 
 	}
 	pair := state.KeyPair{CertificatePEM: accepted.GetAccepted().GetCertificate().GetLeafCertificatePem(), PrivateKeyPEM: pemEncodePrivateKey(keyDER)}
 	ca := accepted.GetAccepted().GetMasterCaPem()
-	if err := persistCredentials(config.CertificateFile, config.PrivateKeyFile, config.CAFile, pair, ca); err != nil {
+	if err := persistCredentials(config.CertificateFile, config.PrivateKeyFile, config.CAFile, config.CSRFile, pair, ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})); err != nil {
 		return state.KeyPair{}, nil, "", err
 	}
 	return pair, ca, accepted.GetAccepted().GetSlaveId(), nil
+}
+
+func enrollmentTLSConfig(ca []byte, serverName string, pinnedSPKI []byte) (*tls.Config, error) {
+	if len(pinnedSPKI) != 0 {
+		if len(pinnedSPKI) != sha256.Size {
+			return nil, errors.New("invalid enrollment SPKI pin")
+		}
+		return &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13, VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return errors.New("enrollment server did not provide a certificate")
+			}
+			certificate, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return fmt.Errorf("parse enrollment server certificate: %w", err)
+			}
+			actual := sha256.Sum256(certificate.RawSubjectPublicKeyInfo)
+			if subtle.ConstantTimeCompare(actual[:], pinnedSPKI) != 1 {
+				return errors.New("enrollment server SPKI pin mismatch")
+			}
+			return nil
+		}}, nil
+	}
+	pool, err := certificatePool(ca)
+	if err != nil {
+		return nil, fmt.Errorf("load enrollment CA: %w", err)
+	}
+	return &tls.Config{RootCAs: pool, ServerName: serverName, MinVersion: tls.VersionTLS13}, nil
 }
 
 func ensureCredentialsAbsent(paths ...string) error {
@@ -228,8 +298,9 @@ func ensureCredentialsAbsent(paths ...string) error {
 	return nil
 }
 
-func persistCredentials(certificateFile, privateKeyFile, caFile string, pair state.KeyPair, ca []byte) error {
-	for _, path := range []string{certificateFile, privateKeyFile, caFile} {
+func persistCredentials(certificateFile, privateKeyFile, caFile, csrFile string, pair state.KeyPair, ca, csr []byte) (err error) {
+	paths := []string{certificateFile, privateKeyFile, caFile, csrFile}
+	for _, path := range paths {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return err
 		}
@@ -237,33 +308,22 @@ func persistCredentials(certificateFile, privateKeyFile, caFile string, pair sta
 			return err
 		}
 	}
+	written := make([]string, 0, len(paths))
+	defer func() {
+		if err != nil {
+			for _, path := range written {
+				_ = os.Remove(path)
+			}
+		}
+	}()
 	for _, item := range []struct {
 		path string
 		data []byte
-	}{{certificateFile, pair.CertificatePEM}, {caFile, ca}} {
+	}{{certificateFile, pair.CertificatePEM}, {privateKeyFile, pair.PrivateKeyPEM}, {caFile, ca}, {csrFile, csr}} {
 		if err := atomicPrivateWrite(item.path, item.data); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-func persistPrivateMaterial(privateKeyFile, csrFile string, privateKey, csr []byte) error {
-	for _, path := range []string{privateKeyFile, csrFile} {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return err
-		}
-		if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
-			return err
-		}
-	}
-	for _, item := range []struct {
-		path string
-		data []byte
-	}{{privateKeyFile, privateKey}, {csrFile, csr}} {
-		if err := atomicPrivateWrite(item.path, item.data); err != nil {
-			return err
-		}
+		written = append(written, item.path)
 	}
 	return nil
 }

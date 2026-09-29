@@ -46,24 +46,28 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	pair, ca, routeKey, err := loadCredentials(cfg)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) || cfg.EnrollmentSecretFile == "" {
+		if !errors.Is(err, os.ErrNotExist) || (cfg.DevelopmentPairingCode == "" && cfg.EnrollmentSecretFile == "") {
 			return err
 		}
-		secret, readErr := os.ReadFile(cfg.EnrollmentSecretFile)
-		if readErr != nil {
-			return fmt.Errorf("read development enrollment secret: %w", readErr)
+		enrollmentConfig := bridgecontrol.EnrollmentClientConfig{Address: cfg.EnrollmentAddress, ServerName: cfg.MasterServerName, DataHost: dataHost(cfg.DataAddress), PairingCode: cfg.DevelopmentPairingCode, SlaveID: cfg.SlaveID, CertificateFile: cfg.CertificateFile, PrivateKeyFile: cfg.PrivateKeyFile, CAFile: cfg.CAFile, CSRFile: cfg.EnrollmentCSRFile}
+		if cfg.DevelopmentPairingCode == "" {
+			secret, readErr := os.ReadFile(cfg.EnrollmentSecretFile)
+			if readErr != nil {
+				return fmt.Errorf("read development enrollment secret: %w", readErr)
+			}
+			bootstrapCA, readErr := os.ReadFile(cfg.EnrollmentCAFile)
+			if readErr != nil {
+				return fmt.Errorf("read enrollment CA: %w", readErr)
+			}
+			enrollmentConfig.Secret, enrollmentConfig.BootstrapCA = secret, bootstrapCA
 		}
-		bootstrapCA, readErr := os.ReadFile(cfg.EnrollmentCAFile)
-		if readErr != nil {
-			return fmt.Errorf("read enrollment CA: %w", readErr)
-		}
-		pair, ca, _, err = bridgecontrol.Enroll(ctx, bridgecontrol.EnrollmentClientConfig{Address: cfg.EnrollmentAddress, ServerName: cfg.MasterServerName, DataHost: dataHost(cfg.DataAddress), BootstrapCA: bootstrapCA, Secret: secret, SlaveID: cfg.SlaveID, CertificateFile: cfg.CertificateFile, PrivateKeyFile: cfg.PrivateKeyFile, CAFile: cfg.CAFile, CSRFile: cfg.EnrollmentCSRFile})
+		pair, ca, _, err = bridgecontrol.Enroll(ctx, enrollmentConfig)
 		if err != nil {
 			return fmt.Errorf("development enrollment: %w", err)
 		}
-		routeKey, readErr = os.ReadFile(cfg.RouteSigningKeyFile)
-		if readErr != nil {
-			return fmt.Errorf("read route signing key: %w", readErr)
+		routeKey, err = os.ReadFile(cfg.RouteSigningKeyFile)
+		if err != nil {
+			return fmt.Errorf("read route signing key: %w", err)
 		}
 	}
 	clientTLS, err := bridgecontrol.TLSConfig(pair, ca, cfg.MasterServerName)

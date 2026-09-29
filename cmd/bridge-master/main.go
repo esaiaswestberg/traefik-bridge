@@ -96,18 +96,14 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	defer func() { _ = controlListener.Close() }()
 	var enrollmentListener net.Listener
 	var enrollmentServer *grpc.Server
-	if cfg.EnrollmentSecretFile != "" || cfg.EnrollmentAddress != "" {
-		if cfg.EnrollmentSecretFile == "" || cfg.EnrollmentAddress == "" {
-			return errors.New("BRIDGE_ENROLLMENT_ADDRESS and BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE must be set together")
-		}
-		secret, readErr := os.ReadFile(cfg.EnrollmentSecretFile)
-		if readErr != nil {
-			return fmt.Errorf("read development enrollment secret: %w", readErr)
-		}
-		enrollment, enrollmentErr := bridgecontrol.NewEnrollmentServer(authority, secret)
+	if cfg.EnrollmentAddress != "" {
+		enrollment, code, enrollmentErr := bridgecontrol.NewPairingEnrollmentServer(authority, func(next string) {
+			logger.Info("bridge-master development pairing code", "pairing_code", next)
+		})
 		if enrollmentErr != nil {
 			return fmt.Errorf("initialize development enrollment: %w", enrollmentErr)
 		}
+		logger.Info("bridge-master development pairing code", "pairing_code", code)
 		enrollmentTLS, enrollmentErr := enrollment.TLSConfig()
 		if enrollmentErr != nil {
 			return enrollmentErr

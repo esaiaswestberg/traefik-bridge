@@ -58,6 +58,55 @@ func TestEnrollmentRejectsBadSecretWithoutCertificate(t *testing.T) {
 	if authority.HasSlave("slave-a") {
 		t.Fatal("master issued a certificate for a bad secret")
 	}
+	for _, name := range []string{"slave.crt", "slave.key", "ca.crt", "slave.csr"} {
+		if _, statErr := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(statErr) {
+			t.Fatalf("failed enrollment left credential %q behind: %v", name, statErr)
+		}
+	}
+}
+
+func TestPairingEnrollmentWithoutBootstrapCA(t *testing.T) {
+	authority := newAuthority(t)
+	_, code, dial := startPairingEnrollmentServer(t, authority)
+	dir := t.TempDir()
+	pair, ca, slaveID, err := Enroll(context.Background(), EnrollmentClientConfig{Address: "bufnet", PairingCode: code, DataHost: "slave.example", SlaveID: "slave-a", CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slaveID != "slave-a" || len(pair.CertificatePEM) == 0 || len(ca) == 0 {
+		t.Fatalf("unexpected enrollment result: slave=%q certificate=%d ca=%d", slaveID, len(pair.CertificatePEM), len(ca))
+	}
+}
+
+func TestPairingEnrollmentRejectsWrongCodeAndPin(t *testing.T) {
+	for _, mutate := range []func(*bridgecrypto.PairingCode){
+		func(code *bridgecrypto.PairingCode) { code.Secret[0] ^= 1 },
+		func(code *bridgecrypto.PairingCode) { code.SPKIPin[0] ^= 1 },
+	} {
+		authority := newAuthority(t)
+		_, code, dial := startPairingEnrollmentServer(t, authority)
+		parsed, err := bridgecrypto.ParsePairingCode(code)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mutate(&parsed)
+		dir := t.TempDir()
+		_, _, _, err = Enroll(context.Background(), EnrollmentClientConfig{Address: "bufnet", PairingCode: parsed.String(), SlaveID: "slave-a", CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
+		if err == nil {
+			t.Fatal("enrollment succeeded with an altered pairing code")
+		}
+	}
+}
+
+func TestPairingCodeRotatesAfterEnrollment(t *testing.T) {
+	authority := newAuthority(t)
+	_, code, dial := startPairingEnrollmentServer(t, authority)
+	enrollWithCode(t, dial, code, "slave-a")
+	dir := t.TempDir()
+	_, _, _, err := Enroll(context.Background(), EnrollmentClientConfig{Address: "bufnet", PairingCode: code, SlaveID: "slave-b", CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
+	if err == nil {
+		t.Fatal("reused pairing code enrolled a second slave")
+	}
 }
 
 func TestEnrollmentRequiresClientProof(t *testing.T) {
@@ -154,6 +203,33 @@ func startEnrollmentServer(t *testing.T, authority *bridgecrypto.Authority, secr
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 	return listener, func(context.Context, string) (net.Conn, error) { return listener.Dial() }
+}
+
+func startPairingEnrollmentServer(t *testing.T, authority *bridgecrypto.Authority) (*bufconn.Listener, string, func(context.Context, string) (net.Conn, error)) {
+	t.Helper()
+	service, code, err := NewPairingEnrollmentServer(authority, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsConfig, err := service.TLSConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := bufconn.Listen(1024 * 1024)
+	server := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConfig)))
+	service.Register(server)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	return listener, code, func(context.Context, string) (net.Conn, error) { return listener.Dial() }
+}
+
+func enrollWithCode(t *testing.T, dial func(context.Context, string) (net.Conn, error), code, slaveID string) {
+	t.Helper()
+	dir := t.TempDir()
+	_, _, _, err := Enroll(context.Background(), EnrollmentClientConfig{Address: "bufnet", PairingCode: code, SlaveID: slaveID, CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func mustPool(t *testing.T, ca []byte) *x509.CertPool {
