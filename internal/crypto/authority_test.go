@@ -99,6 +99,38 @@ func TestExportPEM(t *testing.T) {
 	}
 }
 
+func TestExportTraefikTransport(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "bridge")
+	if err := ExportTraefikTransport(dir); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "bridge-transport.yml")
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `http:
+  serversTransports:
+    bridge-mtls:
+      rootCAs:
+        - /bridge/ca.crt
+      certificates:
+        - certFile: /bridge/master-client.crt
+          keyFile: /bridge/master-client.key
+      insecureSkipVerify: false
+`
+	if string(contents) != want {
+		t.Errorf("transport contents = %q, want %q", contents, want)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Errorf("transport mode = %o, want 644", info.Mode().Perm())
+	}
+}
+
 func TestIssueSlavePersistsTrackedCertificate(t *testing.T) {
 	store := state.NewStore(filepath.Join(t.TempDir(), "master"))
 	authority, err := Initialize(store)

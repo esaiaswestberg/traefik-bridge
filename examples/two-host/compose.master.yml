@@ -6,13 +6,12 @@ services:
       - --entrypoints.websecure.address=:443
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
-      - --providers.file.filename=/etc/traefik/bridge-transport.yml
+      - --providers.file.filename=/bridge/bridge-transport.yml
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ../../deploy/traefik/bridge-transport.yml:/etc/traefik/bridge-transport.yml:ro
       - bridge-master-data:/bridge:ro
     networks:
       - bridge

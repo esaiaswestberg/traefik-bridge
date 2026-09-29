@@ -8,7 +8,7 @@ Build the three images from the repository root:
 make docker-build
 ```
 
-For a two-host deployment, follow [the Compose example](../examples/two-host/README.md). Mount `deploy/traefik/bridge-transport.yml` in Traefik and provide the master-issued CA and client certificate files at the paths it names. The master control listener defaults to `8443` in its container; the example publishes it as Host 1 port `9443`. The slave data listener is `8444` in its container and is published as Host 2 port `9444`.
+For a two-host deployment, follow [the Compose example](../examples/two-host/README.md). Mount the master data directory at `/bridge` in Traefik and set `--providers.file.filename=/bridge/bridge-transport.yml`. The master generates this transport file and the TLS material it references on every start. The master control listener defaults to `8443` in its container; the example publishes it as Host 1 port `9443`. The slave data listener is `8444` in its container and is published as Host 2 port `9444`.
 
 ## Slave credentials
 
@@ -20,7 +20,7 @@ The certificate, private key, CA, and route-signing key should be delivered by a
 
 This is not a production provisioning method. It uses the unaudited `github.com/bytemare/opaque` v0.18.0 implementation of RFC 9807 OPAQUE.
 
-On the master, set `BRIDGE_ENROLLMENT_ADDRESS`; it prints a one-time pairing code. On an unprovisioned slave, set `BRIDGE_ENROLLMENT_ADDRESS` and `BRIDGE_DEVELOPMENT_PAIRING_CODE` along with its identity, addresses, and network. The slave generates and persists its private key, CSR, certificate, CA, and route-signing key as owner-only files after mutually authenticated OPAQUE enrollment. It will not enroll if any configured credential file already exists. The legacy secret, bootstrap-CA, and explicit route-key-file flow remains supported.
+On the master, set `BRIDGE_ENROLLMENT_ADDRESS`; it prints a one-time pairing code. On an unprovisioned slave, set `BRIDGE_ENROLLMENT_ADDRESS` and `BRIDGE_DEVELOPMENT_PAIRING_CODE` along with its identity, addresses, and network. No bootstrap CA, route-signing key, or enrollment secret transfer is required. The slave generates and persists its private key, CSR, certificate, CA, and route-signing key as owner-only files after mutually authenticated OPAQUE enrollment. It will not enroll if any configured credential file already exists. The legacy secret, bootstrap-CA, and explicit route-key-file flow remains supported.
 
 ## Offline certificate provisioning
 

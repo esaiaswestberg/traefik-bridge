@@ -49,6 +49,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err := authority.ExportPEM(cfg.DataDir); err != nil {
 		return fmt.Errorf("export TLS material: %w", err)
 	}
+	if err := bridgecrypto.ExportTraefikTransport(cfg.DataDir); err != nil {
+		return fmt.Errorf("export Traefik transport: %w", err)
+	}
 	routeKey := authority.RouteSigningKey()
 	if cfg.RouteSigningKeyFile != "" {
 		routeKey, err = os.ReadFile(cfg.RouteSigningKeyFile)

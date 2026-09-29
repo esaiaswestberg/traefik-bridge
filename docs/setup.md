@@ -36,20 +36,13 @@ Replace `latest` with the same release tag on all three images to pin a deployme
 
 ## Common Master Files
 
-Before starting Traefik or the master, create the master directories and secrets. Run these commands on the master host.
+Before starting Traefik or the master, create the master data directory. Run this command on the master host.
 
 ```sh
-install -d -m 700 /srv/traefik-bridge/master /srv/traefik-bridge/secrets /srv/traefik-bridge/config
-umask 077
-openssl rand -base64 48 > /srv/traefik-bridge/secrets/route.key
-openssl rand -base64 48 > /srv/traefik-bridge/secrets/enrollment.key
-chmod 600 /srv/traefik-bridge/secrets/*.key
-
-curl -fsSLo /srv/traefik-bridge/config/bridge-transport.yml \
-  https://raw.githubusercontent.com/esaiaswestberg/traefik-bridge/main/deploy/traefik/bridge-transport.yml
+install -d -m 700 /srv/traefik-bridge/master
 ```
 
-`route.key` authorizes proxy-to-slave routes and must be shared with every slave. `enrollment.key` is used only by the development enrollment flow.
+The master creates its route-signing key privately and generates `bridge-transport.yml` in this directory after exporting its TLS material. The generated transport file is safe to mount read-only into Traefik.
 
 The development enrollment flow uses an unaudited OPAQUE implementation. Use [offline certificate provisioning](installation.md#offline-certificate-provisioning) or an external PKI for production.
 
@@ -69,18 +62,14 @@ services:
       - "9445:8445"
     environment:
       BRIDGE_PROXY_IMAGE: ghcr.io/esaiaswestberg/traefik-bridge-proxy:latest
-      BRIDGE_ROUTE_SIGNING_KEY_FILE: /run/secrets/route.key
       BRIDGE_PROXY_CERTIFICATE_MOUNT: /srv/traefik-bridge/master:/bridge
       BRIDGE_ENDPOINT_CIDRS: 10.0.0.20/32
       BRIDGE_ENROLLMENT_ADDRESS: :8445
-      BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE: /run/secrets/enrollment.key
       BRIDGE_ROUTE_TOKEN_LIFETIME: 5m
       BRIDGE_ROUTE_TOKEN_REFRESH_BEFORE: 1m
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /srv/traefik-bridge/master:/bridge
-      - /srv/traefik-bridge/secrets/route.key:/run/secrets/route.key:ro
-      - /srv/traefik-bridge/secrets/enrollment.key:/run/secrets/enrollment.key:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/readyz >/dev/null"]
       interval: 10s
@@ -100,7 +89,7 @@ services:
       - --entrypoints.web.http.redirections.entrypoint.scheme=https
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
-      - --providers.file.filename=/etc/traefik/bridge-transport.yml
+      - --providers.file.filename=/bridge/bridge-transport.yml
       - --certificatesresolvers.letsencrypt.acme.email=admin@example.com
       - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
       - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
@@ -109,7 +98,6 @@ services:
       - "443:443"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /srv/traefik-bridge/config/bridge-transport.yml:/etc/traefik/bridge-transport.yml:ro
       - /srv/traefik-bridge/master:/bridge:ro
       - traefik-letsencrypt:/letsencrypt
     networks:
@@ -130,18 +118,17 @@ docker compose -f /srv/traefik-bridge/compose.master.yml up -d
 docker compose -f /srv/traefik-bridge/compose.master.yml ps
 ```
 
-If Traefik already exists, retain its current Compose service and add the file-provider argument, the two bridge mounts, and the `traefik-bridge` network shown above.
+If Traefik already exists, retain its current Compose service and add the file-provider argument, the master data-directory mount, and the `traefik-bridge` network shown above. `bridge-master` generates `/bridge/bridge-transport.yml` on every start.
 
 ### Slave: Bridge Slave
 
-On the slave, prepare the credential directory. From the master, transfer the bootstrap CA and development secrets through authenticated SSH or another secure private channel.
+For development pairing, retrieve the one-time pairing code from the master logs. No bootstrap CA, route-signing key, or enrollment secret transfer is required. On the slave, prepare a writable credential directory.
 
 ```sh
-ssh root@10.0.0.20 'install -d -m 700 /srv/traefik-bridge/credentials'
-cat /srv/traefik-bridge/secrets/route.key | ssh root@10.0.0.20 'umask 077; cat > /srv/traefik-bridge/credentials/route-signing.key'
-cat /srv/traefik-bridge/secrets/enrollment.key | ssh root@10.0.0.20 'umask 077; cat > /srv/traefik-bridge/credentials/enrollment.key'
-cat /srv/traefik-bridge/master/ca.crt | ssh root@10.0.0.20 'umask 077; cat > /srv/traefik-bridge/credentials/enrollment-ca.crt'
-ssh root@10.0.0.20 'chmod 600 /srv/traefik-bridge/credentials/*'
+docker logs bridge-master | grep pairing_code
+# Run on the slave.
+install -d -m 700 /srv/traefik-bridge/credentials
+export BRIDGE_DEVELOPMENT_PAIRING_CODE='bridge-pair-v1.example'
 ```
 
 Create `/srv/traefik-bridge/compose.slave.yml` on the slave:
@@ -161,12 +148,11 @@ services:
       BRIDGE_DATA_ADDRESS: 10.0.0.20:9444
       BRIDGE_DATA_LISTEN_ADDRESS: :8444
       BRIDGE_DOCKER_NETWORK: traefik-bridge
+      BRIDGE_DEVELOPMENT_PAIRING_CODE: ${BRIDGE_DEVELOPMENT_PAIRING_CODE:?set the one-time code from bridge-master logs}
       BRIDGE_CA_FILE: /run/bridge/ca.crt
       BRIDGE_CERTIFICATE_FILE: /run/bridge/slave.crt
       BRIDGE_PRIVATE_KEY_FILE: /run/bridge/slave.key
       BRIDGE_ROUTE_SIGNING_KEY_FILE: /run/bridge/route-signing.key
-      BRIDGE_ENROLLMENT_CA_FILE: /run/bridge/enrollment-ca.crt
-      BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE: /run/bridge/enrollment.key
       BRIDGE_ENROLLMENT_CSR_FILE: /run/bridge/slave.csr
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -227,20 +213,15 @@ docker run -d --name bridge-master --restart unless-stopped \
   -p 9443:8443 -p 9445:8445 \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v /srv/traefik-bridge/master:/bridge \
-  -v /srv/traefik-bridge/secrets/route.key:/run/secrets/route.key:ro \
-  -v /srv/traefik-bridge/secrets/enrollment.key:/run/secrets/enrollment.key:ro \
   -e BRIDGE_PROXY_IMAGE=ghcr.io/esaiaswestberg/traefik-bridge-proxy:latest \
-  -e BRIDGE_ROUTE_SIGNING_KEY_FILE=/run/secrets/route.key \
   -e BRIDGE_PROXY_CERTIFICATE_MOUNT=/srv/traefik-bridge/master:/bridge \
   -e BRIDGE_ENDPOINT_CIDRS=10.0.0.20/32 \
   -e BRIDGE_ENROLLMENT_ADDRESS=:8445 \
-  -e BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE=/run/secrets/enrollment.key \
   ghcr.io/esaiaswestberg/traefik-bridge-master:latest
 
 docker run -d --name traefik --restart unless-stopped \
   --network traefik-bridge -p 80:80 -p 443:443 \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  -v /srv/traefik-bridge/config/bridge-transport.yml:/etc/traefik/bridge-transport.yml:ro \
   -v /srv/traefik-bridge/master:/bridge:ro \
   -v traefik-letsencrypt:/letsencrypt \
   traefik:v3.6 \
@@ -248,7 +229,7 @@ docker run -d --name traefik --restart unless-stopped \
   --entrypoints.websecure.address=:443 \
   --providers.docker=true \
   --providers.docker.exposedbydefault=false \
-  --providers.file.filename=/etc/traefik/bridge-transport.yml \
+  --providers.file.filename=/bridge/bridge-transport.yml \
   --certificatesresolvers.letsencrypt.acme.email=admin@example.com \
   --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json \
   --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
@@ -256,9 +237,10 @@ docker run -d --name traefik --restart unless-stopped \
 
 ### Slave: Bridge Slave And Application
 
-Transfer enrollment material as in the Compose method, then run on the slave:
+Set `BRIDGE_DEVELOPMENT_PAIRING_CODE` to the one-time code from the master logs, then run on the slave:
 
 ```sh
+install -d -m 700 /srv/traefik-bridge/credentials
 docker network create traefik-bridge 2>/dev/null || true
 
 docker run -d --name bridge-slave --restart unless-stopped \
@@ -276,8 +258,7 @@ docker run -d --name bridge-slave --restart unless-stopped \
   -e BRIDGE_CERTIFICATE_FILE=/run/bridge/slave.crt \
   -e BRIDGE_PRIVATE_KEY_FILE=/run/bridge/slave.key \
   -e BRIDGE_ROUTE_SIGNING_KEY_FILE=/run/bridge/route-signing.key \
-  -e BRIDGE_ENROLLMENT_CA_FILE=/run/bridge/enrollment-ca.crt \
-  -e BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE=/run/bridge/enrollment.key \
+  -e BRIDGE_DEVELOPMENT_PAIRING_CODE="$BRIDGE_DEVELOPMENT_PAIRING_CODE" \
   -e BRIDGE_ENROLLMENT_CSR_FILE=/run/bridge/slave.csr \
   ghcr.io/esaiaswestberg/traefik-bridge-slave:latest
 
@@ -306,7 +287,7 @@ The master stack includes Traefik, its public ports, ACME storage, the Docker pr
 
 ### Slave: Bridge Slave And Application
 
-1. Transfer the enrollment CA and secrets to `/srv/traefik-bridge/credentials` as shown in the Compose method.
+1. Retrieve the one-time pairing code from the master logs and set `BRIDGE_DEVELOPMENT_PAIRING_CODE` in the slave stack.
 2. In Portainer on the slave host, create a stack named `traefik-bridge-slave` using the slave Compose specification above.
 3. Replace the master address, slave address, and slave ID directly in the stack editor, then deploy it.
 4. After enrollment, update the credential bind mount to read-only and redeploy the stack.

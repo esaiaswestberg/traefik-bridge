@@ -25,9 +25,19 @@ import (
 )
 
 const (
-	stateVersion = 1
-	caLifetime   = 10 * 365 * 24 * time.Hour
-	leafLifetime = 365 * 24 * time.Hour
+	stateVersion     = 1
+	caLifetime       = 10 * 365 * 24 * time.Hour
+	leafLifetime     = 365 * 24 * time.Hour
+	traefikTransport = `http:
+  serversTransports:
+    bridge-mtls:
+      rootCAs:
+        - /bridge/ca.crt
+      certificates:
+        - certFile: /bridge/master-client.crt
+          keyFile: /bridge/master-client.key
+      insecureSkipVerify: false
+`
 )
 
 // Authority owns the persisted bridge CA and issued slave certificates.
@@ -162,6 +172,18 @@ func (a *Authority) ExportPEM(dir string) error {
 		return err
 	}
 	return nil
+}
+
+// ExportTraefikTransport atomically writes Traefik's shared bridge transport.
+// It contains only certificate paths, so Traefik can read it as a non-secret.
+func ExportTraefikTransport(dir string) error {
+	if strings.TrimSpace(dir) == "" {
+		return errors.New("transport directory is required")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create transport directory: %w", err)
+	}
+	return writeFile(filepath.Join(dir, "bridge-transport.yml"), []byte(traefikTransport), 0o644)
 }
 
 // IssueSlave signs csrDER for slaveID and records the issued certificate. The
@@ -489,37 +511,41 @@ func randomBytes(length int) ([]byte, error) {
 }
 
 func writePEM(path string, contents []byte, mode os.FileMode) error {
+	return writeFile(path, contents, mode)
+}
+
+func writeFile(path string, contents []byte, mode os.FileMode) error {
 	if len(contents) == 0 {
-		return fmt.Errorf("certificate material for %q is empty", path)
+		return fmt.Errorf("file contents for %q are empty", path)
 	}
 	if info, err := os.Lstat(path); err == nil && (!info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0) {
-		return fmt.Errorf("certificate path %q is not a regular file", path)
+		return fmt.Errorf("file path %q is not a regular file", path)
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect certificate path %q: %w", path, err)
+		return fmt.Errorf("inspect file path %q: %w", path, err)
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".bridge-pem-*")
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".bridge-file-*")
 	if err != nil {
-		return fmt.Errorf("create temporary certificate file: %w", err)
+		return fmt.Errorf("create temporary file: %w", err)
 	}
 	temporaryPath := temporary.Name()
 	defer func() { _ = os.Remove(temporaryPath) }()
 	if err := temporary.Chmod(mode); err != nil {
 		_ = temporary.Close()
-		return fmt.Errorf("secure temporary certificate file: %w", err)
+		return fmt.Errorf("secure temporary file: %w", err)
 	}
 	if _, err := temporary.Write(contents); err != nil {
 		_ = temporary.Close()
-		return fmt.Errorf("write certificate file: %w", err)
+		return fmt.Errorf("write file: %w", err)
 	}
 	if err := temporary.Sync(); err != nil {
 		_ = temporary.Close()
-		return fmt.Errorf("sync certificate file: %w", err)
+		return fmt.Errorf("sync file: %w", err)
 	}
 	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close certificate file: %w", err)
+		return fmt.Errorf("close file: %w", err)
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
-		return fmt.Errorf("replace certificate file: %w", err)
+		return fmt.Errorf("replace file: %w", err)
 	}
 	return nil
 }
