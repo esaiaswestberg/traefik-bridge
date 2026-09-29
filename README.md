@@ -97,7 +97,7 @@ docker compose --env-file /srv/traefik-bridge/.env \
 docker exec bridge-master wget -q -O - http://localhost:8080/readyz
 ```
 
-The master initializes its CA and exports `ca.crt`, `master-client.crt`, `master-client.key`, and `bridge-transport.yml` under `/srv/traefik-bridge/master`. The transport file is regenerated atomically on every master start.
+The master initializes its CA and route-signing key, then exports `ca.crt`, `master-client.crt`, `master-client.key`, and `bridge-transport.yml` under `/srv/traefik-bridge/master`. The transport file is regenerated atomically on every master start.
 
 ## 3. Attach Traefik To The Bridge
 
@@ -131,7 +131,7 @@ Preserve your existing Traefik command arguments, socket mount, public ports, AC
 
 The automatic enrollment flow is for development only because its OPAQUE implementation is not independently audited. For production, use the offline CSR workflow in [docs/installation.md](docs/installation.md) or an external PKI.
 
-For development, retrieve the one-time pairing code from the master logs. No bootstrap CA, route-signing key, or enrollment secret transfer is required. Create the slave credential directory locally; it must be writable for the first enrollment.
+For development, retrieve the one-time pairing code from the master logs. No bootstrap CA, route-signing key, or enrollment secret transfer is required. The code pins the master's TLS identity and is consumed after one successful enrollment, so retrieve a new code before pairing each additional slave. Create the slave credential directory locally; it must be writable for the first enrollment.
 
 ```sh
 docker logs bridge-master | grep pairing_code
@@ -157,12 +157,7 @@ services:
       BRIDGE_DATA_ADDRESS: ${SLAVE_LAN}:9444
       BRIDGE_DATA_LISTEN_ADDRESS: :8444
       BRIDGE_DOCKER_NETWORK: traefik-bridge
-      BRIDGE_DEVELOPMENT_PAIRING_CODE: ${BRIDGE_DEVELOPMENT_PAIRING_CODE:?set the one-time code from bridge-master logs}
-      BRIDGE_CA_FILE: /run/bridge/ca.crt
-      BRIDGE_CERTIFICATE_FILE: /run/bridge/slave.crt
-      BRIDGE_PRIVATE_KEY_FILE: /run/bridge/slave.key
-      BRIDGE_ROUTE_SIGNING_KEY_FILE: /run/bridge/route-signing.key
-      BRIDGE_ENROLLMENT_CSR_FILE: /run/bridge/slave.csr
+      BRIDGE_DEVELOPMENT_PAIRING_CODE: ${BRIDGE_DEVELOPMENT_PAIRING_CODE:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # Writable only for first enrollment; make this read-only afterward.
@@ -194,7 +189,7 @@ docker logs bridge-slave
 docker exec bridge-slave wget -q -O - http://localhost:8080/readyz
 ```
 
-First enrollment creates `slave.key`, `slave.csr`, `slave.crt`, and `ca.crt`. Once the slave is healthy, change the credential volume to `- /srv/traefik-bridge/credentials:/run/bridge:ro` and run `docker compose ... up -d` again.
+First enrollment creates `slave.key`, `slave.csr`, `slave.crt`, `ca.crt`, and `route-signing.key`. Once the slave is healthy, remove `BRIDGE_DEVELOPMENT_PAIRING_CODE`, change the credential volume to `- /srv/traefik-bridge/credentials:/run/bridge:ro`, and run `docker compose ... up -d` again.
 
 ## 5. Publish A Remote Application
 
@@ -262,7 +257,7 @@ Apply the same commands to `compose.slave.yml` on the slave.
 
 - Allow TCP 9443 and 9445 on the master only from slave LAN/VPN addresses.
 - Allow TCP 9444 on every slave only from master LAN/VPN addresses.
-- Keep `/srv/traefik-bridge/secrets`, `/srv/traefik-bridge/master`, and slave credentials private and backed up.
+- Keep `/srv/traefik-bridge/master` and slave credentials private and backed up. Limit access to master logs while a pairing code is active.
 - Never expose Docker's API over TCP.
 - Development OPAQUE enrollment is unaudited; use offline provisioning or an external PKI in production.
 

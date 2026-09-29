@@ -42,7 +42,7 @@ Before starting Traefik or the master, create the master data directory. Run thi
 install -d -m 700 /srv/traefik-bridge/master
 ```
 
-The master creates its route-signing key privately and generates `bridge-transport.yml` in this directory after exporting its TLS material. The generated transport file is safe to mount read-only into Traefik.
+The master creates its CA and route-signing key privately and generates `bridge-transport.yml` in this directory after exporting its TLS material. The generated transport file is safe to mount read-only into Traefik.
 
 The development enrollment flow uses an unaudited OPAQUE implementation. Use [offline certificate provisioning](installation.md#offline-certificate-provisioning) or an external PKI for production.
 
@@ -122,10 +122,10 @@ If Traefik already exists, retain its current Compose service and add the file-p
 
 ### Slave: Bridge Slave
 
-For development pairing, retrieve the one-time pairing code from the master logs. No bootstrap CA, route-signing key, or enrollment secret transfer is required. On the slave, prepare a writable credential directory.
+For development pairing, retrieve the one-time pairing code from the master logs. No bootstrap CA, route-signing key, or enrollment secret transfer is required. The code pins the master's TLS identity and is consumed after one successful enrollment; retrieve a new code before pairing each additional slave. On the slave, prepare a writable credential directory.
 
 ```sh
-docker logs bridge-master | grep pairing_code
+docker compose -f /srv/traefik-bridge/compose.master.yml logs bridge-master | grep pairing_code
 # Run on the slave.
 install -d -m 700 /srv/traefik-bridge/credentials
 export BRIDGE_DEVELOPMENT_PAIRING_CODE='bridge-pair-v1.example'
@@ -148,12 +148,7 @@ services:
       BRIDGE_DATA_ADDRESS: 10.0.0.20:9444
       BRIDGE_DATA_LISTEN_ADDRESS: :8444
       BRIDGE_DOCKER_NETWORK: traefik-bridge
-      BRIDGE_DEVELOPMENT_PAIRING_CODE: ${BRIDGE_DEVELOPMENT_PAIRING_CODE:?set the one-time code from bridge-master logs}
-      BRIDGE_CA_FILE: /run/bridge/ca.crt
-      BRIDGE_CERTIFICATE_FILE: /run/bridge/slave.crt
-      BRIDGE_PRIVATE_KEY_FILE: /run/bridge/slave.key
-      BRIDGE_ROUTE_SIGNING_KEY_FILE: /run/bridge/route-signing.key
-      BRIDGE_ENROLLMENT_CSR_FILE: /run/bridge/slave.csr
+      BRIDGE_DEVELOPMENT_PAIRING_CODE: ${BRIDGE_DEVELOPMENT_PAIRING_CODE:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /srv/traefik-bridge/credentials:/run/bridge
@@ -172,7 +167,7 @@ docker compose -f /srv/traefik-bridge/compose.slave.yml up -d
 docker logs bridge-slave
 ```
 
-First enrollment writes `slave.key`, `slave.csr`, `slave.crt`, and `ca.crt`. After it succeeds, change the credential mount to `- /srv/traefik-bridge/credentials:/run/bridge:ro` and run Compose again.
+First enrollment writes `slave.key`, `slave.csr`, `slave.crt`, `ca.crt`, and `route-signing.key`. After it succeeds, remove `BRIDGE_DEVELOPMENT_PAIRING_CODE`, change the credential mount to `- /srv/traefik-bridge/credentials:/run/bridge:ro`, and run Compose again.
 
 ### Remote Application
 
@@ -254,12 +249,7 @@ docker run -d --name bridge-slave --restart unless-stopped \
   -e BRIDGE_DATA_ADDRESS=10.0.0.20:9444 \
   -e BRIDGE_DATA_LISTEN_ADDRESS=:8444 \
   -e BRIDGE_DOCKER_NETWORK=traefik-bridge \
-  -e BRIDGE_CA_FILE=/run/bridge/ca.crt \
-  -e BRIDGE_CERTIFICATE_FILE=/run/bridge/slave.crt \
-  -e BRIDGE_PRIVATE_KEY_FILE=/run/bridge/slave.key \
-  -e BRIDGE_ROUTE_SIGNING_KEY_FILE=/run/bridge/route-signing.key \
   -e BRIDGE_DEVELOPMENT_PAIRING_CODE="$BRIDGE_DEVELOPMENT_PAIRING_CODE" \
-  -e BRIDGE_ENROLLMENT_CSR_FILE=/run/bridge/slave.csr \
   ghcr.io/esaiaswestberg/traefik-bridge-slave:latest
 
 docker run -d --name whoami --restart unless-stopped --network traefik-bridge \
@@ -290,7 +280,7 @@ The master stack includes Traefik, its public ports, ACME storage, the Docker pr
 1. Retrieve the one-time pairing code from the master logs and set `BRIDGE_DEVELOPMENT_PAIRING_CODE` in the slave stack.
 2. In Portainer on the slave host, create a stack named `traefik-bridge-slave` using the slave Compose specification above.
 3. Replace the master address, slave address, and slave ID directly in the stack editor, then deploy it.
-4. After enrollment, update the credential bind mount to read-only and redeploy the stack.
+4. After enrollment, remove `BRIDGE_DEVELOPMENT_PAIRING_CODE`, update the credential bind mount to read-only, and redeploy the stack.
 5. Create a separate application stack using the remote Whoami Compose specification, or use the same network and standard Traefik labels for an existing stack.
 
 ## Verify
@@ -312,6 +302,6 @@ docker exec bridge-master wget -q -O - http://localhost:8080/readyz
 
 - Restrict TCP 9443 and 9445 on the master to slave LAN/VPN addresses.
 - Restrict TCP 9444 on every slave to master LAN/VPN addresses.
-- Keep `/srv/traefik-bridge/secrets`, `/srv/traefik-bridge/master`, and slave credentials private and backed up.
+- Keep `/srv/traefik-bridge/master` and slave credentials private and backed up. Limit access to master logs while a pairing code is active.
 - Never expose Docker's API over TCP.
 - Development OPAQUE enrollment is unaudited; use offline provisioning or an external PKI in production.

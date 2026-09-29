@@ -23,18 +23,17 @@ services:
     environment:
       BRIDGE_DATA_DIR: /bridge
       BRIDGE_PROXY_IMAGE: traefik-bridge-proxy:local
-      BRIDGE_ROUTE_SIGNING_KEY_FILE: /run/secrets/route.key
       BRIDGE_PROXY_CERTIFICATE_MOUNT: bridge-master-data:/bridge
+      BRIDGE_ENROLLMENT_ADDRESS: :8445
       # Refresh route tokens one minute before their five-minute default expiry.
       BRIDGE_ROUTE_TOKEN_REFRESH_BEFORE: 1m
     ports:
       - "9443:8443"
+      - "9445:8445"
     volumes:
       # Docker socket access lets master control containers on this host.
       - /var/run/docker.sock:/var/run/docker.sock
       - bridge-master-data:/bridge
-    secrets:
-      - route.key
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/readyz >/dev/null"]
       interval: 10s
@@ -57,7 +56,3 @@ networks:
 
 volumes:
   bridge-master-data:
-
-secrets:
-  route.key:
-    file: ./secrets/route.key

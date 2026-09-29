@@ -12,15 +12,15 @@ For a two-host deployment, follow [the Compose example](../examples/two-host/REA
 
 ## Slave credentials
 
-`bridge-slave` normally starts with provisioned mTLS and route-signing material. Configure `BRIDGE_SLAVE_ID` with the master and data addresses and `BRIDGE_DOCKER_NETWORK`. Credential paths default to `/run/bridge/ca.crt`, `/run/bridge/slave.crt`, `/run/bridge/slave.key`, `/run/bridge/route-signing.key`, and `/run/bridge/slave.csr`; configure explicit paths for an existing provisioning workflow. The slave certificate must identify the configured slave ID and be issued by the same CA used by the master.
+`bridge-slave` normally starts with paired or provisioned mTLS and route-signing material. Configure `BRIDGE_SLAVE_ID` with the master and data addresses and `BRIDGE_DOCKER_NETWORK`. Credential paths default to `/run/bridge/ca.crt`, `/run/bridge/slave.crt`, `/run/bridge/slave.key`, `/run/bridge/route-signing.key`, and `/run/bridge/slave.csr`; configure explicit paths for an existing provisioning workflow. The slave certificate must identify the configured slave ID and be issued by the same CA used by the master.
 
-The certificate, private key, CA, and route-signing key should be delivered by an authenticated deployment workflow and mounted read-only.
+For offline provisioning, deliver the certificate, private key, CA, and route-signing key through an authenticated deployment workflow and mount them read-only.
 
 ### Development-only PAKE enrollment
 
 This is not a production provisioning method. It uses the unaudited `github.com/bytemare/opaque` v0.18.0 implementation of RFC 9807 OPAQUE.
 
-On the master, set `BRIDGE_ENROLLMENT_ADDRESS`; it prints a one-time pairing code. On an unprovisioned slave, set `BRIDGE_ENROLLMENT_ADDRESS` and `BRIDGE_DEVELOPMENT_PAIRING_CODE` along with its identity, addresses, and network. No bootstrap CA, route-signing key, or enrollment secret transfer is required. The slave generates and persists its private key, CSR, certificate, CA, and route-signing key as owner-only files after mutually authenticated OPAQUE enrollment. It will not enroll if any configured credential file already exists. The legacy secret, bootstrap-CA, and explicit route-key-file flow remains supported.
+On the master, set `BRIDGE_ENROLLMENT_ADDRESS`; it logs a one-time pairing code. On an unprovisioned slave, set `BRIDGE_ENROLLMENT_ADDRESS` and `BRIDGE_DEVELOPMENT_PAIRING_CODE` along with its identity, addresses, and network. The code carries an OPAQUE credential and a pin for the master's TLS public key, so no bootstrap CA, route-signing key, or enrollment secret transfer is required. The slave generates and persists its private key, CSR, certificate, CA, and route-signing key as owner-only files after mutually authenticated OPAQUE enrollment. It will not enroll if any configured credential file already exists. A successful enrollment rotates the code; retrieve the newly logged code before enrolling another slave. Remove the code from the slave configuration and make the credential mount read-only after enrollment. The legacy secret, bootstrap-CA, and explicit route-key-file flow remains supported for existing deployments.
 
 ## Offline certificate provisioning
 
@@ -40,7 +40,7 @@ docker compose -f examples/two-host/compose.master.yml run --rm --no-deps --entr
 docker compose -f examples/two-host/compose.master.yml up -d bridge-master
 ```
 
-`-data-host` must exactly match the host in `BRIDGE_DATA_ADDRESS`; it rejects CSRs without that DNS or IP subject alternative name. Place `slave.key` and the same `route-signing.key` in `/secure/bridge-slave-credentials` on the slave host. Copy `ca.crt` and `slave.crt` from the provisioning output to that directory through an authenticated out-of-band channel.
+`-data-host` must exactly match the host in `BRIDGE_DATA_ADDRESS`; it rejects CSRs without that DNS or IP subject alternative name. Copy `slave.key`, `ca.crt`, and `slave.crt` to the slave through an authenticated out-of-band channel. For this manual workflow, configure `BRIDGE_ROUTE_SIGNING_KEY_FILE` on the master and distribute that same key as `route-signing.key` to the slave through the same protected channel.
 
 ## Master proxy credentials
 
