@@ -19,13 +19,14 @@ const (
 
 // State is the complete persistent state owned by a bridge master.
 type State struct {
-	Version      int              `json:"version"`
-	MasterID     string           `json:"master_id"`
-	CA           KeyPair          `json:"ca"`
-	MasterServer KeyPair          `json:"master_server"`
-	MasterClient KeyPair          `json:"master_client"`
-	Slaves       map[string]Slave `json:"slaves"`
-	Enrollment   Enrollment       `json:"enrollment"`
+	Version         int              `json:"version"`
+	MasterID        string           `json:"master_id"`
+	CA              KeyPair          `json:"ca"`
+	MasterServer    KeyPair          `json:"master_server"`
+	MasterClient    KeyPair          `json:"master_client"`
+	RouteSigningKey []byte           `json:"route_signing_key"`
+	Slaves          map[string]Slave `json:"slaves"`
+	Enrollment      Enrollment       `json:"enrollment"`
 }
 
 // Enrollment holds opaque server material. None of these fields contain the

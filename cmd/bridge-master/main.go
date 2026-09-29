@@ -49,9 +49,12 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err := authority.ExportPEM(cfg.DataDir); err != nil {
 		return fmt.Errorf("export TLS material: %w", err)
 	}
-	routeKey, err := os.ReadFile(cfg.RouteSigningKeyFile)
-	if err != nil {
-		return fmt.Errorf("read route signing key: %w", err)
+	routeKey := authority.RouteSigningKey()
+	if cfg.RouteSigningKeyFile != "" {
+		routeKey, err = os.ReadFile(cfg.RouteSigningKeyFile)
+		if err != nil {
+			return fmt.Errorf("read route signing key: %w", err)
+		}
 	}
 	signer, err := proxy.NewSigner(routeKey)
 	if err != nil {
@@ -103,6 +106,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		if enrollmentErr != nil {
 			return fmt.Errorf("initialize development enrollment: %w", enrollmentErr)
 		}
+		enrollment.SetRouteSigningKey(routeKey)
 		logger.Info("bridge-master development pairing code", "pairing_code", code)
 		enrollmentTLS, enrollmentErr := enrollment.TLSConfig()
 		if enrollmentErr != nil {

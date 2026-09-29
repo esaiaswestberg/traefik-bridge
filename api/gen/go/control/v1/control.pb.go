@@ -341,13 +341,14 @@ func (*EnrollmentResponse_Accepted) isEnrollmentResponse_Result() {}
 func (*EnrollmentResponse_Rejected) isEnrollmentResponse_Result() {}
 
 type EnrollmentAccepted struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SlaveId       string                 `protobuf:"bytes,1,opt,name=slave_id,json=slaveId,proto3" json:"slave_id,omitempty"`
-	Certificate   *CertificateBundle     `protobuf:"bytes,2,opt,name=certificate,proto3" json:"certificate,omitempty"`
-	RenewAfter    *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=renew_after,json=renewAfter,proto3" json:"renew_after,omitempty"`
-	MasterCaPem   []byte                 `protobuf:"bytes,4,opt,name=master_ca_pem,json=masterCaPem,proto3" json:"master_ca_pem,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	SlaveId         string                 `protobuf:"bytes,1,opt,name=slave_id,json=slaveId,proto3" json:"slave_id,omitempty"`
+	Certificate     *CertificateBundle     `protobuf:"bytes,2,opt,name=certificate,proto3" json:"certificate,omitempty"`
+	RenewAfter      *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=renew_after,json=renewAfter,proto3" json:"renew_after,omitempty"`
+	MasterCaPem     []byte                 `protobuf:"bytes,4,opt,name=master_ca_pem,json=masterCaPem,proto3" json:"master_ca_pem,omitempty"`
+	RouteSigningKey []byte                 `protobuf:"bytes,5,opt,name=route_signing_key,json=routeSigningKey,proto3" json:"route_signing_key,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *EnrollmentAccepted) Reset() {
@@ -404,6 +405,13 @@ func (x *EnrollmentAccepted) GetRenewAfter() *timestamppb.Timestamp {
 func (x *EnrollmentAccepted) GetMasterCaPem() []byte {
 	if x != nil {
 		return x.MasterCaPem
+	}
+	return nil
+}
+
+func (x *EnrollmentAccepted) GetRouteSigningKey() []byte {
+	if x != nil {
+		return x.RouteSigningKey
 	}
 	return nil
 }
@@ -1760,13 +1768,14 @@ const file_control_v1_control_proto_rawDesc = "" +
 	"\baccepted\x18\x03 \x01(\v2-.traefik.bridge.control.v1.EnrollmentAcceptedH\x00R\baccepted\x12K\n" +
 	"\brejected\x18\x04 \x01(\v2-.traefik.bridge.control.v1.EnrollmentRejectedH\x00R\brejected\x12'\n" +
 	"\x0fserver_identity\x18\x05 \x01(\fR\x0eserverIdentityB\b\n" +
-	"\x06result\"\xe0\x01\n" +
+	"\x06result\"\x8c\x02\n" +
 	"\x12EnrollmentAccepted\x12\x19\n" +
 	"\bslave_id\x18\x01 \x01(\tR\aslaveId\x12N\n" +
 	"\vcertificate\x18\x02 \x01(\v2,.traefik.bridge.control.v1.CertificateBundleR\vcertificate\x12;\n" +
 	"\vrenew_after\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"renewAfter\x12\"\n" +
-	"\rmaster_ca_pem\x18\x04 \x01(\fR\vmasterCaPem\"l\n" +
+	"\rmaster_ca_pem\x18\x04 \x01(\fR\vmasterCaPem\x12*\n" +
+	"\x11route_signing_key\x18\x05 \x01(\fR\x0frouteSigningKey\"l\n" +
 	"\x12EnrollmentRejected\x12<\n" +
 	"\x04code\x18\x01 \x01(\x0e2(.traefik.bridge.control.v1.RejectionCodeR\x04code\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\"\xa3\x03\n" +

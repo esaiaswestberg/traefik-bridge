@@ -27,6 +27,16 @@ func TestLoadMasterRejectsInvalidConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadMasterDefaultsRouteSigningKeyToAuthority(t *testing.T) {
+	config, err := loadMaster(environment(masterEnvironment(map[string]string{"BRIDGE_ROUTE_SIGNING_KEY_FILE": ""})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.RouteSigningKeyFile != "" {
+		t.Fatalf("RouteSigningKeyFile = %q, want authority default", config.RouteSigningKeyFile)
+	}
+}
+
 func TestLoadSlave(t *testing.T) {
 	config, err := loadSlave(environment(slaveEnvironment(map[string]string{"BRIDGE_CONSTRAINT_LABELS": "bridge.zone=east,team=platform"})))
 	if err != nil {
@@ -34,6 +44,16 @@ func TestLoadSlave(t *testing.T) {
 	}
 	if config.ConstraintLabels["bridge.zone"] != "east" || config.ConstraintLabels["team"] != "platform" {
 		t.Fatalf("constraints = %#v", config.ConstraintLabels)
+	}
+}
+
+func TestLoadSlaveDefaultsCredentialPaths(t *testing.T) {
+	config, err := loadSlave(environment(map[string]string{"BRIDGE_MASTER_ADDRESS": "master:8443", "BRIDGE_DATA_ADDRESS": "slave:8444", "BRIDGE_DOCKER_NETWORK": "apps", "BRIDGE_SLAVE_ID": "slave-a"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.CAFile != "/run/bridge/ca.crt" || config.CertificateFile != "/run/bridge/slave.crt" || config.PrivateKeyFile != "/run/bridge/slave.key" || config.RouteSigningKeyFile != "/run/bridge/route-signing.key" || config.EnrollmentCSRFile != "/run/bridge/slave.csr" {
+		t.Fatalf("credential defaults = %#v", config)
 	}
 }
 

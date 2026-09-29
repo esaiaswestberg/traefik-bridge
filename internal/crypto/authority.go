@@ -68,6 +68,15 @@ func load(store *state.Store, create bool) (*Authority, error) {
 	if persisted.Version != stateVersion {
 		return nil, fmt.Errorf("unsupported master state version %d", persisted.Version)
 	}
+	if len(persisted.RouteSigningKey) == 0 {
+		persisted.RouteSigningKey, err = randomBytes(32)
+		if err == nil {
+			err = store.Save(persisted)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("migrate route signing key: %w", err)
+		}
+	}
 	ca, key, err := parseCA(persisted.CA)
 	if err != nil {
 		return nil, fmt.Errorf("load certificate authority: %w", err)
@@ -83,6 +92,9 @@ func (a *Authority) MasterClient() state.KeyPair { return a.state.MasterClient }
 
 // MasterID returns the stable identifier assigned when the authority is created.
 func (a *Authority) MasterID() string { return a.state.MasterID }
+
+// RouteSigningKey returns the private key used to authenticate proxy routes.
+func (a *Authority) RouteSigningKey() []byte { return append([]byte(nil), a.state.RouteSigningKey...) }
 
 // MatchesSlave reports whether cert is the currently issued certificate for
 // slaveID. TLS verification is performed by the caller.
@@ -394,7 +406,11 @@ func newState() (*state.State, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &state.State{Version: stateVersion, MasterID: masterID, CA: ca, MasterServer: server, MasterClient: client, Slaves: make(map[string]state.Slave)}, nil
+	routeSigningKey, err := randomBytes(32)
+	if err != nil {
+		return nil, err
+	}
+	return &state.State{Version: stateVersion, MasterID: masterID, CA: ca, MasterServer: server, MasterClient: client, RouteSigningKey: routeSigningKey, Slaves: make(map[string]state.Slave)}, nil
 }
 
 func issueIdentity(ca *x509.Certificate, caKey *ecdsa.PrivateKey, commonName string, dnsNames []string, usages []x509.ExtKeyUsage) (state.KeyPair, error) {

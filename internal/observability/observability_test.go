@@ -2,6 +2,7 @@ package observability
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -52,5 +53,15 @@ func TestJSONLoggerOutput(t *testing.T) {
 	NewJSONLogger(&output, slog.LevelInfo).Info("connected", "slave_id", "slave-a")
 	if got := output.String(); !strings.Contains(got, `"msg":"connected"`) || !strings.Contains(got, `"slave_id":"slave-a"`) {
 		t.Errorf("log output = %q", got)
+	}
+}
+
+func TestStatusExcludesRouteSigningKey(t *testing.T) {
+	contents, err := json.Marshal(Status{Routes: []RouteStatus{{ID: "route-a"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(contents), "route_signing_key") {
+		t.Fatalf("status exposed route signing key: %s", contents)
 	}
 }

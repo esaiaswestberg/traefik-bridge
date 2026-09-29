@@ -33,6 +33,35 @@ func TestInitializeReusesPersistedAuthority(t *testing.T) {
 	if string(first.MasterClient().CertificatePEM) != string(second.MasterClient().CertificatePEM) {
 		t.Error("master client certificate changed after restart")
 	}
+	if string(first.RouteSigningKey()) != string(second.RouteSigningKey()) || len(first.RouteSigningKey()) < 32 {
+		t.Error("route signing key was not persisted")
+	}
+}
+
+func TestInitializeMigratesMissingRouteSigningKey(t *testing.T) {
+	store := state.NewStore(filepath.Join(t.TempDir(), "master"))
+	authority, err := Initialize(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority.state.RouteSigningKey = nil
+	if err := store.Save(authority.state); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := Initialize(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(migrated.RouteSigningKey()) < 32 {
+		t.Fatal("migration did not create a route signing key")
+	}
+	persisted, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(persisted.RouteSigningKey) != string(migrated.RouteSigningKey()) {
+		t.Fatal("migration did not persist route signing key")
+	}
 }
 
 func TestExportPEM(t *testing.T) {

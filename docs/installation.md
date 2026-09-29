@@ -12,7 +12,7 @@ For a two-host deployment, follow [the Compose example](../examples/two-host/REA
 
 ## Slave credentials
 
-`bridge-slave` normally starts with provisioned mTLS and route-signing material. Configure `BRIDGE_SLAVE_ID`, `BRIDGE_CA_FILE`, `BRIDGE_CERTIFICATE_FILE`, `BRIDGE_PRIVATE_KEY_FILE`, and `BRIDGE_ROUTE_SIGNING_KEY_FILE`, along with the master and data addresses and `BRIDGE_DOCKER_NETWORK`. The slave certificate must identify the configured slave ID and be issued by the same CA used by the master.
+`bridge-slave` normally starts with provisioned mTLS and route-signing material. Configure `BRIDGE_SLAVE_ID` with the master and data addresses and `BRIDGE_DOCKER_NETWORK`. Credential paths default to `/run/bridge/ca.crt`, `/run/bridge/slave.crt`, `/run/bridge/slave.key`, `/run/bridge/route-signing.key`, and `/run/bridge/slave.csr`; configure explicit paths for an existing provisioning workflow. The slave certificate must identify the configured slave ID and be issued by the same CA used by the master.
 
 The certificate, private key, CA, and route-signing key should be delivered by an authenticated deployment workflow and mounted read-only.
 
@@ -20,7 +20,7 @@ The certificate, private key, CA, and route-signing key should be delivered by a
 
 This is not a production provisioning method. It uses the unaudited `github.com/bytemare/opaque` v0.18.0 implementation of RFC 9807 OPAQUE.
 
-On the master, set `BRIDGE_ENROLLMENT_ADDRESS` and `BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE`. On an unprovisioned slave, set `BRIDGE_ENROLLMENT_ADDRESS`, `BRIDGE_ENROLLMENT_CA_FILE`, `BRIDGE_ENROLLMENT_CSR_FILE`, and the same `BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE`. The enrollment CA must trust the master certificate. Use a unique random secret of at least 32 bytes, stored in an owner-only file. The slave generates and persists its private key and CSR locally, completes mutual OPAQUE authentication over server-authenticated TLS, then saves its certificate and CA as owner-only files. It will not enroll if any configured credential file already exists.
+On the master, set `BRIDGE_ENROLLMENT_ADDRESS`; it prints a one-time pairing code. On an unprovisioned slave, set `BRIDGE_ENROLLMENT_ADDRESS` and `BRIDGE_DEVELOPMENT_PAIRING_CODE` along with its identity, addresses, and network. The slave generates and persists its private key, CSR, certificate, CA, and route-signing key as owner-only files after mutually authenticated OPAQUE enrollment. It will not enroll if any configured credential file already exists. The legacy secret, bootstrap-CA, and explicit route-key-file flow remains supported.
 
 ## Offline certificate provisioning
 
@@ -44,7 +44,7 @@ docker compose -f examples/two-host/compose.master.yml up -d bridge-master
 
 ## Master proxy credentials
 
-`bridge-master` requires `BRIDGE_ROUTE_SIGNING_KEY_FILE`, containing the same route-signing key provisioned to each slave. It signs short-lived per-service route tokens while reconciling; generated `bridge-proxy` containers receive the tokens, never that key. `BRIDGE_ROUTE_TOKEN_LIFETIME` defaults to five minutes and `BRIDGE_ROUTE_TOKEN_REFRESH_BEFORE` defaults to one minute. The refresh window must be positive and shorter than the lifetime.
+`bridge-master` generates and stores a random route-signing key in its private state on first initialization. It signs short-lived per-service route tokens while reconciling; generated `bridge-proxy` containers receive the tokens, never that key. `BRIDGE_ROUTE_SIGNING_KEY_FILE` is an optional override for legacy deployments and is delivered to newly paired slaves. `BRIDGE_ROUTE_TOKEN_LIFETIME` defaults to five minutes and `BRIDGE_ROUTE_TOKEN_REFRESH_BEFORE` defaults to one minute. The refresh window must be positive and shorter than the lifetime.
 
 The master records accepted snapshots and proxy expiry timestamps in its private data directory before changing Docker. It restores that state after restart and refreshes only proxies approaching expiry. The state never contains route tokens.
 

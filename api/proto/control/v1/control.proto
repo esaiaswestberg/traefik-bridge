@@ -40,6 +40,7 @@ message EnrollmentAccepted {
   CertificateBundle certificate = 2;
   google.protobuf.Timestamp renew_after = 3;
   bytes master_ca_pem = 4;
+  bytes route_signing_key = 5;
 }
 
 message EnrollmentRejected {

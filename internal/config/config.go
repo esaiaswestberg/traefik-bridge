@@ -102,9 +102,6 @@ func loadMaster(getenv func(string) string) (Master, error) {
 	if config.ProxyImage == "" {
 		return Master{}, errors.New("BRIDGE_PROXY_IMAGE is required")
 	}
-	if config.RouteSigningKeyFile == "" {
-		return Master{}, errors.New("BRIDGE_ROUTE_SIGNING_KEY_FILE is required")
-	}
 	if config.ProxyCertificateMount == "" || !strings.Contains(config.ProxyCertificateMount, ":") {
 		return Master{}, errors.New("BRIDGE_PROXY_CERTIFICATE_MOUNT must be a source:target mount")
 	}
@@ -141,13 +138,13 @@ func loadSlave(getenv func(string) string) (Slave, error) {
 		DockerHost:             value(getenv, "BRIDGE_DOCKER_HOST", defaultDockerHost),
 		DefaultNetwork:         strings.TrimSpace(getenv("BRIDGE_DOCKER_NETWORK")),
 		SlaveID:                strings.TrimSpace(getenv("BRIDGE_SLAVE_ID")),
-		CAFile:                 strings.TrimSpace(getenv("BRIDGE_CA_FILE")),
-		CertificateFile:        strings.TrimSpace(getenv("BRIDGE_CERTIFICATE_FILE")),
-		PrivateKeyFile:         strings.TrimSpace(getenv("BRIDGE_PRIVATE_KEY_FILE")),
-		RouteSigningKeyFile:    strings.TrimSpace(getenv("BRIDGE_ROUTE_SIGNING_KEY_FILE")),
+		CAFile:                 value(getenv, "BRIDGE_CA_FILE", "/run/bridge/ca.crt"),
+		CertificateFile:        value(getenv, "BRIDGE_CERTIFICATE_FILE", "/run/bridge/slave.crt"),
+		PrivateKeyFile:         value(getenv, "BRIDGE_PRIVATE_KEY_FILE", "/run/bridge/slave.key"),
+		RouteSigningKeyFile:    value(getenv, "BRIDGE_ROUTE_SIGNING_KEY_FILE", "/run/bridge/route-signing.key"),
 		EnrollmentCAFile:       strings.TrimSpace(getenv("BRIDGE_ENROLLMENT_CA_FILE")),
 		EnrollmentSecretFile:   strings.TrimSpace(getenv("BRIDGE_DEVELOPMENT_ENROLLMENT_SECRET_FILE")),
-		EnrollmentCSRFile:      strings.TrimSpace(getenv("BRIDGE_ENROLLMENT_CSR_FILE")),
+		EnrollmentCSRFile:      value(getenv, "BRIDGE_ENROLLMENT_CSR_FILE", "/run/bridge/slave.csr"),
 		DevelopmentPairingCode: strings.TrimSpace(getenv("BRIDGE_DEVELOPMENT_PAIRING_CODE")),
 	}
 	if config.MasterAddress == "" {
@@ -165,25 +162,11 @@ func loadSlave(getenv func(string) string) (Slave, error) {
 	if config.DefaultNetwork == "" {
 		return Slave{}, errors.New("BRIDGE_DOCKER_NETWORK is required")
 	}
-	for name, path := range map[string]string{
-		"BRIDGE_SLAVE_ID":               config.SlaveID,
-		"BRIDGE_ROUTE_SIGNING_KEY_FILE": config.RouteSigningKeyFile,
-	} {
-		if path == "" {
-			return Slave{}, fmt.Errorf("%s is required", name)
-		}
-	}
-	credentialPaths := []string{config.CAFile, config.CertificateFile, config.PrivateKeyFile}
-	for _, path := range credentialPaths {
-		if path == "" {
-			return Slave{}, errors.New("BRIDGE_CA_FILE, BRIDGE_CERTIFICATE_FILE, and BRIDGE_PRIVATE_KEY_FILE are required")
-		}
+	if config.SlaveID == "" {
+		return Slave{}, errors.New("BRIDGE_SLAVE_ID is required")
 	}
 	if config.DevelopmentPairingCode == "" && config.EnrollmentSecretFile != "" && config.EnrollmentCAFile == "" {
 		return Slave{}, errors.New("BRIDGE_ENROLLMENT_CA_FILE is required with development enrollment")
-	}
-	if (config.EnrollmentSecretFile != "" || config.DevelopmentPairingCode != "") && config.EnrollmentCSRFile == "" {
-		return Slave{}, errors.New("BRIDGE_ENROLLMENT_CSR_FILE is required with development enrollment")
 	}
 	constraints, err := labels(getenv("BRIDGE_CONSTRAINT_LABELS"))
 	if err != nil {

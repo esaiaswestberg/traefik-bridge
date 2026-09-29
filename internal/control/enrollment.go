@@ -32,11 +32,12 @@ import (
 // served with TLS server authentication, but never requires a client cert.
 type EnrollmentServer struct {
 	controlv1.UnimplementedEnrollmentServiceServer
-	authority  *bridgecrypto.Authority
-	enrollment *bridgecrypto.Enrollment
-	rotate     bool
-	onRotate   func(string)
-	mu         sync.Mutex
+	authority       *bridgecrypto.Authority
+	enrollment      *bridgecrypto.Enrollment
+	routeSigningKey []byte
+	rotate          bool
+	onRotate        func(string)
+	mu              sync.Mutex
 }
 
 // NewPairingEnrollmentServer starts a development pairing session and returns
@@ -49,7 +50,7 @@ func NewPairingEnrollmentServer(authority *bridgecrypto.Authority, onRotate func
 	if err != nil {
 		return nil, "", err
 	}
-	return &EnrollmentServer{authority: authority, enrollment: enrollment, rotate: true, onRotate: onRotate}, code, nil
+	return &EnrollmentServer{authority: authority, enrollment: enrollment, routeSigningKey: authority.RouteSigningKey(), rotate: true, onRotate: onRotate}, code, nil
 }
 
 func NewEnrollmentServer(authority *bridgecrypto.Authority, secret []byte) (*EnrollmentServer, error) {
@@ -60,7 +61,13 @@ func NewEnrollmentServer(authority *bridgecrypto.Authority, secret []byte) (*Enr
 	if err != nil {
 		return nil, err
 	}
-	return &EnrollmentServer{authority: authority, enrollment: enrollment}, nil
+	return &EnrollmentServer{authority: authority, enrollment: enrollment, routeSigningKey: authority.RouteSigningKey()}, nil
+}
+
+// SetRouteSigningKey overrides the authority key for legacy deployments that
+// configure a shared route-signing key file.
+func (s *EnrollmentServer) SetRouteSigningKey(key []byte) {
+	s.routeSigningKey = append([]byte(nil), key...)
 }
 
 func (s *EnrollmentServer) Register(registrar grpc.ServiceRegistrar) {
@@ -115,7 +122,7 @@ func (s *EnrollmentServer) Enroll(stream controlv1.EnrollmentService_EnrollServe
 	if err != nil {
 		return status.Error(codes.Internal, "issue slave certificate: "+err.Error())
 	}
-	if err := stream.Send(&controlv1.EnrollmentResponse{EnrollmentId: first.GetEnrollmentId(), Result: &controlv1.EnrollmentResponse_Accepted{Accepted: &controlv1.EnrollmentAccepted{SlaveId: slaveID, Certificate: &controlv1.CertificateBundle{LeafCertificatePem: issued.CertificatePEM}, MasterCaPem: s.authority.CACertificate()}}}); err != nil {
+	if err := stream.Send(&controlv1.EnrollmentResponse{EnrollmentId: first.GetEnrollmentId(), Result: &controlv1.EnrollmentResponse_Accepted{Accepted: &controlv1.EnrollmentAccepted{SlaveId: slaveID, Certificate: &controlv1.CertificateBundle{LeafCertificatePem: issued.CertificatePEM}, MasterCaPem: s.authority.CACertificate(), RouteSigningKey: s.routeSigningKey}}}); err != nil {
 		return err
 	}
 	if s.rotate {
@@ -141,28 +148,29 @@ func validateEnrollmentCSR(csrDER []byte) error {
 
 // EnrollmentClientConfig contains bootstrap inputs and target credential paths.
 type EnrollmentClientConfig struct {
-	Address         string
-	ServerName      string
-	DataHost        string
-	BootstrapCA     []byte
-	Secret          []byte
-	PairingCode     string
-	SlaveID         string
-	CertificateFile string
-	PrivateKeyFile  string
-	CAFile          string
-	CSRFile         string
-	DialContext     func(context.Context, string) (net.Conn, error)
-	pinnedSPKI      []byte
+	Address             string
+	ServerName          string
+	DataHost            string
+	BootstrapCA         []byte
+	Secret              []byte
+	PairingCode         string
+	SlaveID             string
+	CertificateFile     string
+	PrivateKeyFile      string
+	CAFile              string
+	RouteSigningKeyFile string
+	CSRFile             string
+	DialContext         func(context.Context, string) (net.Conn, error)
+	pinnedSPKI          []byte
 }
 
 // Enroll creates a private key and CSR, mutually authenticates with OPAQUE,
 // and atomically persists the issued credentials. Existing files are refused.
-func Enroll(ctx context.Context, config EnrollmentClientConfig) (state.KeyPair, []byte, string, error) {
+func Enroll(ctx context.Context, config EnrollmentClientConfig) (state.KeyPair, []byte, []byte, string, error) {
 	if config.PairingCode != "" {
 		pairing, err := bridgecrypto.ParsePairingCode(config.PairingCode)
 		if err != nil {
-			return state.KeyPair{}, nil, "", err
+			return state.KeyPair{}, nil, nil, "", err
 		}
 		config.Secret = pairing.Secret
 		config.BootstrapCA = nil
@@ -170,14 +178,26 @@ func Enroll(ctx context.Context, config EnrollmentClientConfig) (state.KeyPair, 
 		config.pinnedSPKI = pairing.SPKIPin
 	}
 	if len(config.Secret) < 32 {
-		return state.KeyPair{}, nil, "", errors.New("development enrollment secret must contain at least 32 bytes")
+		return state.KeyPair{}, nil, nil, "", errors.New("development enrollment secret must contain at least 32 bytes")
 	}
-	if err := ensureCredentialsAbsent(config.CertificateFile, config.PrivateKeyFile, config.CAFile, config.CSRFile); err != nil {
-		return state.KeyPair{}, nil, "", err
+	credentialPaths := []string{config.CertificateFile, config.PrivateKeyFile, config.CAFile, config.CSRFile}
+	persistRouteSigningKey := true
+	if config.PairingCode == "" {
+		if _, err := os.Lstat(config.RouteSigningKeyFile); err == nil {
+			persistRouteSigningKey = false
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return state.KeyPair{}, nil, nil, "", fmt.Errorf("inspect credential %q: %w", config.RouteSigningKeyFile, err)
+		}
+	}
+	if persistRouteSigningKey {
+		credentialPaths = append(credentialPaths, config.RouteSigningKeyFile)
+	}
+	if err := ensureCredentialsAbsent(credentialPaths...); err != nil {
+		return state.KeyPair{}, nil, nil, "", err
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return state.KeyPair{}, nil, "", fmt.Errorf("generate slave key: %w", err)
+		return state.KeyPair{}, nil, nil, "", fmt.Errorf("generate slave key: %w", err)
 	}
 	request := &x509.CertificateRequest{Subject: pkix.Name{CommonName: config.SlaveID}}
 	if ip := net.ParseIP(config.DataHost); ip != nil {
@@ -187,29 +207,29 @@ func Enroll(ctx context.Context, config EnrollmentClientConfig) (state.KeyPair, 
 	}
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, request, key)
 	if err != nil {
-		return state.KeyPair{}, nil, "", fmt.Errorf("create slave CSR: %w", err)
+		return state.KeyPair{}, nil, nil, "", fmt.Errorf("create slave CSR: %w", err)
 	}
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		return state.KeyPair{}, nil, "", err
+		return state.KeyPair{}, nil, nil, "", err
 	}
 	configuration := opaque.DefaultConfiguration()
 	client, err := configuration.Client()
 	if err != nil {
-		return state.KeyPair{}, nil, "", fmt.Errorf("create OPAQUE client: %w", err)
+		return state.KeyPair{}, nil, nil, "", fmt.Errorf("create OPAQUE client: %w", err)
 	}
 	defer client.ClearState()
 	ke1, err := client.GenerateKE1(config.Secret)
 	if err != nil {
-		return state.KeyPair{}, nil, "", fmt.Errorf("create OPAQUE KE1: %w", err)
+		return state.KeyPair{}, nil, nil, "", fmt.Errorf("create OPAQUE KE1: %w", err)
 	}
 	id, err := enrollmentID()
 	if err != nil {
-		return state.KeyPair{}, nil, "", err
+		return state.KeyPair{}, nil, nil, "", err
 	}
 	tlsConfig, err := enrollmentTLSConfig(config.BootstrapCA, config.ServerName, config.pinnedSPKI)
 	if err != nil {
-		return state.KeyPair{}, nil, "", err
+		return state.KeyPair{}, nil, nil, "", err
 	}
 	dialOptions := []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))}
 	if config.DialContext != nil {
@@ -217,44 +237,48 @@ func Enroll(ctx context.Context, config EnrollmentClientConfig) (state.KeyPair, 
 	}
 	connection, err := grpc.NewClient(config.Address, dialOptions...)
 	if err != nil {
-		return state.KeyPair{}, nil, "", err
+		return state.KeyPair{}, nil, nil, "", err
 	}
 	defer func() { _ = connection.Close() }()
 	stream, err := controlv1.NewEnrollmentServiceClient(connection).Enroll(ctx)
 	if err != nil {
-		return state.KeyPair{}, nil, "", err
+		return state.KeyPair{}, nil, nil, "", err
 	}
 	if err := stream.Send(&controlv1.EnrollmentRequest{ProtocolVersion: "v1", EnrollmentId: id, SlaveId: config.SlaveID, PakeMessage: ke1.Serialize(), CsrDer: csrDER}); err != nil {
-		return state.KeyPair{}, nil, "", err
+		return state.KeyPair{}, nil, nil, "", err
 	}
 	response, err := stream.Recv()
 	if err != nil {
-		return state.KeyPair{}, nil, "", err
+		return state.KeyPair{}, nil, nil, "", err
 	}
 	ke2, err := client.Deserialize.KE2(response.GetPakeMessage())
 	if err != nil {
-		return state.KeyPair{}, nil, "", errors.New("enrollment authentication failed")
+		return state.KeyPair{}, nil, nil, "", errors.New("enrollment authentication failed")
 	}
 	ke3, _, _, err := client.GenerateKE3(ke2, []byte("traefik-bridge:cluster"), response.GetServerIdentity())
 	if err != nil {
-		return state.KeyPair{}, nil, "", errors.New("enrollment authentication failed")
+		return state.KeyPair{}, nil, nil, "", errors.New("enrollment authentication failed")
 	}
 	if err := stream.Send(&controlv1.EnrollmentRequest{EnrollmentId: id, PakeMessage: ke3.Serialize()}); err != nil {
-		return state.KeyPair{}, nil, "", err
+		return state.KeyPair{}, nil, nil, "", err
 	}
 	accepted, err := stream.Recv()
 	if err != nil {
-		return state.KeyPair{}, nil, "", err
+		return state.KeyPair{}, nil, nil, "", err
 	}
 	if accepted.GetAccepted() == nil {
-		return state.KeyPair{}, nil, "", errors.New("enrollment was rejected")
+		return state.KeyPair{}, nil, nil, "", errors.New("enrollment was rejected")
 	}
 	pair := state.KeyPair{CertificatePEM: accepted.GetAccepted().GetCertificate().GetLeafCertificatePem(), PrivateKeyPEM: pemEncodePrivateKey(keyDER)}
 	ca := accepted.GetAccepted().GetMasterCaPem()
-	if err := persistCredentials(config.CertificateFile, config.PrivateKeyFile, config.CAFile, config.CSRFile, pair, ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})); err != nil {
-		return state.KeyPair{}, nil, "", err
+	routeSigningKey := accepted.GetAccepted().GetRouteSigningKey()
+	if len(routeSigningKey) == 0 {
+		return state.KeyPair{}, nil, nil, "", errors.New("enrollment did not provide a route signing key")
 	}
-	return pair, ca, accepted.GetAccepted().GetSlaveId(), nil
+	if err := persistCredentials(config.CertificateFile, config.PrivateKeyFile, config.CAFile, config.RouteSigningKeyFile, config.CSRFile, pair, ca, routeSigningKey, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}), persistRouteSigningKey); err != nil {
+		return state.KeyPair{}, nil, nil, "", err
+	}
+	return pair, ca, routeSigningKey, accepted.GetAccepted().GetSlaveId(), nil
 }
 
 func enrollmentTLSConfig(ca []byte, serverName string, pinnedSPKI []byte) (*tls.Config, error) {
@@ -298,8 +322,11 @@ func ensureCredentialsAbsent(paths ...string) error {
 	return nil
 }
 
-func persistCredentials(certificateFile, privateKeyFile, caFile, csrFile string, pair state.KeyPair, ca, csr []byte) (err error) {
+func persistCredentials(certificateFile, privateKeyFile, caFile, routeSigningKeyFile, csrFile string, pair state.KeyPair, ca, routeSigningKey, csr []byte, persistRouteSigningKey bool) (err error) {
 	paths := []string{certificateFile, privateKeyFile, caFile, csrFile}
+	if persistRouteSigningKey {
+		paths = append(paths, routeSigningKeyFile)
+	}
 	for _, path := range paths {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return err
@@ -316,10 +343,17 @@ func persistCredentials(certificateFile, privateKeyFile, caFile, csrFile string,
 			}
 		}
 	}()
-	for _, item := range []struct {
+	items := []struct {
 		path string
 		data []byte
-	}{{certificateFile, pair.CertificatePEM}, {privateKeyFile, pair.PrivateKeyPEM}, {caFile, ca}, {csrFile, csr}} {
+	}{{certificateFile, pair.CertificatePEM}, {privateKeyFile, pair.PrivateKeyPEM}, {caFile, ca}, {csrFile, csr}}
+	if persistRouteSigningKey {
+		items = append(items, struct {
+			path string
+			data []byte
+		}{routeSigningKeyFile, routeSigningKey})
+	}
+	for _, item := range items {
 		if err := atomicPrivateWrite(item.path, item.data); err != nil {
 			return err
 		}
