@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"errors"
+	"net/url"
 	"testing"
 	"time"
 
@@ -132,6 +133,40 @@ func TestRunPublishesInitiallyAndAfterRelevantEvents(t *testing.T) {
 	}
 }
 
+func TestRunUpdatesLocalServicesBeforePublishingSnapshots(t *testing.T) {
+	events := make(chan Event, 3)
+	client := &fakeClient{containers: []Container{}, events: events, errs: make(chan error)}
+	updater := &fakeServicePoolUpdater{}
+	publisher := &checkingPublisher{updater: updater, published: make(chan *controlv1.FullSnapshot, 3)}
+	discovery, err := NewDiscovery(client, publisher, Config{DefaultNetwork: "apps"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	discovery.SetServicePoolUpdater(updater)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- discovery.Run(ctx) }()
+	waitSnapshot(t, publisher.published, 1)
+
+	client.containers = []Container{{ID: "app", Name: "/app", Labels: map[string]string{traefikEnableLabel: "true", "traefik.http.services.api.loadbalancer.server.port": "8080"}, Networks: map[string]Network{"apps": {IPAddress: "172.18.0.2"}}}}
+	events <- Event{Type: "container", Action: "start"}
+	waitSnapshot(t, publisher.published, 2)
+	if got := updater.services["api"]; len(got) != 1 || got[0].String() != "http://172.18.0.2:8080" {
+		t.Fatalf("updated targets = %#v", got)
+	}
+
+	client.containers = nil
+	events <- Event{Type: "container", Action: "destroy"}
+	waitSnapshot(t, publisher.published, 3)
+	if len(updater.services) != 0 {
+		t.Fatalf("targets after removal = %#v", updater.services)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRunReturnsEventErrors(t *testing.T) {
 	errs := make(chan error, 1)
 	errs <- errors.New("socket disconnected")
@@ -156,6 +191,32 @@ func (f *fakeClient) Events(context.Context) (<-chan Event, <-chan error) { retu
 
 type fakePublisher struct {
 	published chan *controlv1.FullSnapshot
+}
+
+type fakeServicePoolUpdater struct {
+	services map[string][]*url.URL
+}
+
+func (f *fakeServicePoolUpdater) UpdateServices(services map[string][]*url.URL) error {
+	f.services = services
+	return nil
+}
+
+type checkingPublisher struct {
+	updater   *fakeServicePoolUpdater
+	published chan *controlv1.FullSnapshot
+}
+
+func (p *checkingPublisher) PublishSnapshot(_ context.Context, snapshot *controlv1.FullSnapshot) error {
+	for _, application := range snapshot.GetApplications() {
+		for _, service := range application.GetServices() {
+			if len(p.updater.services[service.GetServiceId()]) == 0 {
+				return errors.New("snapshot published before local service update")
+			}
+		}
+	}
+	p.published <- snapshot
+	return nil
 }
 
 func (f *fakePublisher) PublishSnapshot(_ context.Context, snapshot *controlv1.FullSnapshot) error {

@@ -109,6 +109,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("initialize data proxy: %w", err)
 	}
 	defer handler.Close()
+	discovery.SetServicePoolUpdater(handler)
 	dataTLS, err := dataTLSConfig(pair, ca)
 	if err != nil {
 		return err

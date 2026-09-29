@@ -193,6 +193,7 @@ type TargetHealth struct {
 type Slave struct {
 	signer    *Signer
 	grace     time.Duration
+	poolsMu   sync.RWMutex
 	pools     map[string]*targetPool
 	transport http.RoundTripper
 	metrics   observability.Recorder
@@ -218,20 +219,9 @@ func NewSlave(config SlaveConfig) (*Slave, error) {
 	if config.Grace < 0 {
 		return nil, errors.New("route grace must not be negative")
 	}
-	pools := make(map[string]*targetPool, len(config.Services))
-	for service, targets := range config.Services {
-		if service == "" || len(targets) == 0 {
-			return nil, errors.New("every service requires a target")
-		}
-		pool := &targetPool{targets: make([]target, len(targets))}
-		for i, targetURL := range targets {
-			if targetURL == nil || targetURL.Scheme == "" || targetURL.Host == "" {
-				return nil, fmt.Errorf("service %q has an invalid target", service)
-			}
-			copy := *targetURL
-			pool.targets[i] = target{url: &copy, healthy: true}
-		}
-		pools[service] = pool
+	pools, err := newTargetPools(config.Services)
+	if err != nil {
+		return nil, err
 	}
 	checks := make(map[string]HealthCheck, len(config.HealthChecks))
 	for service, check := range config.HealthChecks {
@@ -267,6 +257,37 @@ func NewSlave(config SlaveConfig) (*Slave, error) {
 	return slave, nil
 }
 
+// UpdateServices atomically replaces all local service target pools.
+func (s *Slave) UpdateServices(services map[string][]*url.URL) error {
+	pools, err := newTargetPools(services)
+	if err != nil {
+		return err
+	}
+	s.poolsMu.Lock()
+	s.pools = pools
+	s.poolsMu.Unlock()
+	return nil
+}
+
+func newTargetPools(services map[string][]*url.URL) (map[string]*targetPool, error) {
+	pools := make(map[string]*targetPool, len(services))
+	for service, targets := range services {
+		if service == "" || len(targets) == 0 {
+			return nil, errors.New("every service requires a target")
+		}
+		pool := &targetPool{targets: make([]target, len(targets))}
+		for i, targetURL := range targets {
+			if targetURL == nil || targetURL.Scheme == "" || targetURL.Host == "" {
+				return nil, fmt.Errorf("service %q has an invalid target", service)
+			}
+			copy := *targetURL
+			pool.targets[i] = target{url: &copy, healthy: true}
+		}
+		pools[service] = pool
+	}
+	return pools, nil
+}
+
 // ServeHTTP validates the route token before proxying to the selected local target.
 func (s *Slave) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	route, err := s.signer.Verify(request.Header.Get(RouteHeader), s.grace)
@@ -277,7 +298,9 @@ func (s *Slave) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 		http.Error(response, "invalid bridge route", http.StatusForbidden)
 		return
 	}
+	s.poolsMu.RLock()
 	pool := s.pools[route.ServiceID]
+	s.poolsMu.RUnlock()
 	if pool == nil {
 		if s.metrics != nil {
 			s.metrics.ProxyRequest("slave", http.StatusNotFound)
@@ -353,6 +376,8 @@ func (s *Slave) Close() {
 
 // Status returns a consistent, testable snapshot of local target health.
 func (s *Slave) Status() map[string][]TargetHealth {
+	s.poolsMu.RLock()
+	defer s.poolsMu.RUnlock()
 	status := make(map[string][]TargetHealth, len(s.pools))
 	for service, pool := range s.pools {
 		pool.mu.Lock()
@@ -381,7 +406,9 @@ func (s *Slave) runHealthChecks(ctx context.Context, service string, check Healt
 }
 
 func (s *Slave) checkService(ctx context.Context, service string, check HealthCheck) {
+	s.poolsMu.RLock()
 	pool := s.pools[service]
+	s.poolsMu.RUnlock()
 	if pool == nil {
 		return
 	}
@@ -394,7 +421,9 @@ func (s *Slave) checkService(ctx context.Context, service string, check HealthCh
 }
 
 func (s *Slave) checkTarget(ctx context.Context, service string, index int, check HealthCheck) {
+	s.poolsMu.RLock()
 	pool := s.pools[service]
+	s.poolsMu.RUnlock()
 	if pool == nil {
 		return
 	}

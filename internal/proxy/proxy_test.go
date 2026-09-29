@@ -132,6 +132,41 @@ func TestExpiredRouteRejectedAfterGrace(t *testing.T) {
 	}
 }
 
+func TestSlaveUpdatesServicesAfterStartup(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte("updated"))
+	}))
+	defer backend.Close()
+	signer, err := NewSigner([]byte("test route signing key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	slave, err := NewSlave(SlaveConfig{Signer: signer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := slave.UpdateServices(map[string][]*url.URL{"service": {mustURL(t, backend.URL)}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := serveSlave(t, slave, signer, "service"); got != "updated" {
+		t.Fatalf("response after service update = %q", got)
+	}
+	if err := slave.UpdateServices(nil); err != nil {
+		t.Fatal(err)
+	}
+	token, err := signer.Sign(Route{RouteID: "route", ServiceID: "service", ExpiresAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://bridge/", nil)
+	request.Header.Set(RouteHeader, token)
+	response := httptest.NewRecorder()
+	slave.ServeHTTP(response, request)
+	if got, want := response.Code, http.StatusNotFound; got != want {
+		t.Fatalf("status after service removal = %d, want %d", got, want)
+	}
+}
+
 func TestSlaveHealthChecksUseNormalRoutingAndRecoverTargets(t *testing.T) {
 	var firstHealthy atomic.Bool
 	var healthPath atomic.Value

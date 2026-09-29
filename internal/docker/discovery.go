@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	controlv1 "github.com/traefik/traefik-bridge/api/gen/go/control/v1"
 )
@@ -56,6 +57,11 @@ type SnapshotPublisher interface {
 	PublishSnapshot(context.Context, *controlv1.FullSnapshot) error
 }
 
+// ServicePoolUpdater replaces the slave data-plane targets for a Docker view.
+type ServicePoolUpdater interface {
+	UpdateServices(map[string][]*url.URL) error
+}
+
 // Config controls Docker application selection.
 type Config struct {
 	DefaultNetwork   string
@@ -68,6 +74,16 @@ type Discovery struct {
 	publisher SnapshotPublisher
 	config    Config
 	revision  uint64
+	updaterMu sync.RWMutex
+	updater   ServicePoolUpdater
+}
+
+// SetServicePoolUpdater sets the data-plane target updater. It must be called
+// before Run so every published snapshot has matching local targets.
+func (d *Discovery) SetServicePoolUpdater(updater ServicePoolUpdater) {
+	d.updaterMu.Lock()
+	d.updater = updater
+	d.updaterMu.Unlock()
 }
 
 // NewDiscovery creates Docker discovery. A default network is required so a
@@ -91,6 +107,10 @@ func (d *Discovery) Snapshot(ctx context.Context) (*controlv1.FullSnapshot, erro
 	if err != nil {
 		return nil, fmt.Errorf("list Docker containers: %w", err)
 	}
+	return d.snapshot(containers), nil
+}
+
+func (d *Discovery) snapshot(containers []Container) *controlv1.FullSnapshot {
 	applications := make([]*controlv1.ApplicationSnapshot, 0, len(containers))
 	for _, container := range containers {
 		application, ok := d.application(container)
@@ -102,15 +122,25 @@ func (d *Discovery) Snapshot(ctx context.Context) (*controlv1.FullSnapshot, erro
 	d.revision++
 	snapshot := &controlv1.FullSnapshot{Revision: d.revision, Applications: applications}
 	snapshot.SnapshotId = snapshotID(snapshot)
-	return snapshot, nil
+	return snapshot
 }
 
 // Publish sends a newly-built full snapshot through the control abstraction.
 func (d *Discovery) Publish(ctx context.Context) error {
-	snapshot, err := d.Snapshot(ctx)
+	containers, err := d.client.ListContainers(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("list Docker containers: %w", err)
 	}
+	services := d.services(containers)
+	d.updaterMu.RLock()
+	updater := d.updater
+	d.updaterMu.RUnlock()
+	if updater != nil {
+		if err := updater.UpdateServices(services); err != nil {
+			return fmt.Errorf("update local service targets: %w", err)
+		}
+	}
+	snapshot := d.snapshot(containers)
 	if err := d.publisher.PublishSnapshot(ctx, snapshot); err != nil {
 		return fmt.Errorf("publish Docker snapshot: %w", err)
 	}
@@ -125,6 +155,10 @@ func (d *Discovery) Services(ctx context.Context) (map[string][]*url.URL, error)
 	if err != nil {
 		return nil, fmt.Errorf("list Docker containers: %w", err)
 	}
+	return d.services(containers), nil
+}
+
+func (d *Discovery) services(containers []Container) map[string][]*url.URL {
 	result := make(map[string][]*url.URL)
 	for _, container := range containers {
 		application, ok := d.application(container)
@@ -140,7 +174,7 @@ func (d *Discovery) Services(ctx context.Context) (map[string][]*url.URL, error)
 			result[service.GetServiceId()] = append(result[service.GetServiceId()], target)
 		}
 	}
-	return result, nil
+	return result
 }
 
 // Run publishes an initial snapshot, then publishes after events which can
