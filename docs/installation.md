@@ -8,7 +8,7 @@ Build the three images from the repository root:
 make docker-build
 ```
 
-For a two-host deployment, follow [the Compose example](../examples/two-host/README.md). Mount the master data directory at `/bridge` in Traefik and set `--providers.file.filename=/bridge/bridge-transport.yml`. The master generates this transport file and the TLS material it references on every start. The master control listener defaults to `8443` in its container; the example publishes it as Host 1 port `9443`. The slave data listener is `8444` in its container and is published as Host 2 port `9444`.
+For a two-host deployment, follow [the Compose example](../examples/two-host/README.md). Mount the persistent `bridge-master-data` Docker volume at `/bridge` in Traefik and set `--providers.file.filename=/bridge/bridge-transport.yml`. The master generates this transport file and the TLS material it references on every start. The master control listener defaults to `8443` in its container; the example publishes it as Host 1 port `9443`. The slave data listener is `8444` in its container and is published as Host 2 port `9444`.
 
 ## Slave credentials
 

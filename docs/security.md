@@ -8,7 +8,7 @@ Limit Docker socket access to trusted administrators and the master container. P
 
 ## Credentials and transport
 
-Keep the bridge CA private key, paired or provisioned slave private keys, and route-signing keys outside version control. Use a secret manager or protected deployment environment, rotate credentials when access changes, and use a private network with firewall rules for master-slave control and data traffic. Traefik should mount only the CA and master client certificate material it needs, read-only. The generated `ServersTransport` keeps TLS verification enabled.
+Keep the bridge CA private key, paired or provisioned slave private keys, and route-signing keys outside version control. Back up and restrict access to the `bridge-master-data` Docker volume, use a secret manager or protected deployment environment for manually provisioned credentials, rotate credentials when access changes, and use a private network with firewall rules for master-slave control and data traffic. Traefik should mount the volume read-only. The generated `ServersTransport` keeps TLS verification enabled.
 
 ## Development-only PAKE enrollment
 

@@ -56,3 +56,4 @@ networks:
 
 volumes:
   bridge-master-data:
+    name: bridge-master-data

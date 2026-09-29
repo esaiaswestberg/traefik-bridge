@@ -54,13 +54,7 @@ docker pull ghcr.io/esaiaswestberg/traefik-bridge-slave:latest
 
 ## 2. Configure The Master
 
-Run these commands on the **master**.
-
-```sh
-install -d -m 700 /srv/traefik-bridge/master
-```
-
-Create `/srv/traefik-bridge/compose.master.yml`:
+From a directory where you keep Compose files on the master, create `compose.master.yml`:
 
 ```yaml
 services:
@@ -73,17 +67,21 @@ services:
       - "9445:8445"
     environment:
       BRIDGE_PROXY_IMAGE: ghcr.io/esaiaswestberg/traefik-bridge-proxy:latest
-      BRIDGE_PROXY_CERTIFICATE_MOUNT: /srv/traefik-bridge/master:/bridge
+      BRIDGE_PROXY_CERTIFICATE_MOUNT: bridge-master-data:/bridge
       BRIDGE_ENDPOINT_CIDRS: ${SLAVE_LAN}/32
       BRIDGE_ENROLLMENT_ADDRESS: :8445
       BRIDGE_ROUTE_TOKEN_LIFETIME: 5m
       BRIDGE_ROUTE_TOKEN_REFRESH_BEFORE: 1m
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /srv/traefik-bridge/master:/bridge
+      - bridge-master-data:/bridge
+
+volumes:
+  bridge-master-data:
+    name: bridge-master-data
 ```
 
-Create `/srv/traefik-bridge/.env`:
+Create `.env` alongside it:
 
 ```dotenv
 SLAVE_LAN=10.0.0.20
@@ -92,12 +90,11 @@ SLAVE_LAN=10.0.0.20
 Start the master:
 
 ```sh
-docker compose --env-file /srv/traefik-bridge/.env \
-  -f /srv/traefik-bridge/compose.master.yml up -d
+docker compose --env-file .env -f compose.master.yml up -d
 docker exec bridge-master wget -q -O - http://localhost:8080/readyz
 ```
 
-The master initializes its CA and route-signing key, then exports `ca.crt`, `master-client.crt`, `master-client.key`, and `bridge-transport.yml` under `/srv/traefik-bridge/master`. The transport file is regenerated atomically on every master start.
+Docker creates the `bridge-master-data` volume automatically. The master initializes its CA and route-signing key there, then exports `ca.crt`, `master-client.crt`, `master-client.key`, and `bridge-transport.yml`. The transport file is regenerated atomically on every master start.
 
 ## 3. Attach Traefik To The Bridge
 
@@ -115,7 +112,7 @@ services:
     command:
       - --providers.file.filename=/bridge/bridge-transport.yml
     volumes:
-      - /srv/traefik-bridge/master:/bridge:ro
+      - bridge-master-data:/bridge:ro
     networks:
       - traefik-bridge
 
@@ -123,6 +120,11 @@ networks:
   traefik-bridge:
     external: true
     name: traefik-bridge
+
+volumes:
+  bridge-master-data:
+    external: true
+    name: bridge-master-data
 ```
 
 Preserve your existing Traefik command arguments, socket mount, public ports, ACME configuration, and networks. Traefik reads the generated `/bridge/bridge-transport.yml`, whose file-provider transport is named `bridge-mtls@file`; generated services reference it automatically. Do not set `insecureSkipVerify`.
@@ -257,7 +259,7 @@ Apply the same commands to `compose.slave.yml` on the slave.
 
 - Allow TCP 9443 and 9445 on the master only from slave LAN/VPN addresses.
 - Allow TCP 9444 on every slave only from master LAN/VPN addresses.
-- Keep `/srv/traefik-bridge/master` and slave credentials private and backed up. Limit access to master logs while a pairing code is active.
+- Back up `bridge-master-data` and keep slave credentials private. Limit access to master logs while a pairing code is active.
 - Never expose Docker's API over TCP.
 - Development OPAQUE enrollment is unaudited; use offline provisioning or an external PKI in production.
 

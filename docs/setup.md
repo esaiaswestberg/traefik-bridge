@@ -34,15 +34,9 @@ ghcr.io/esaiaswestberg/traefik-bridge-proxy:latest
 
 Replace `latest` with the same release tag on all three images to pin a deployment.
 
-## Common Master Files
+## Master Data Volume
 
-Before starting Traefik or the master, create the master data directory. Run this command on the master host.
-
-```sh
-install -d -m 700 /srv/traefik-bridge/master
-```
-
-The master creates its CA and route-signing key privately and generates `bridge-transport.yml` in this directory after exporting its TLS material. The generated transport file is safe to mount read-only into Traefik.
+The Compose and Docker CLI examples use the persistent named volume `bridge-master-data`. Docker creates it automatically on first use. The master creates its CA and route-signing key there and generates `bridge-transport.yml` after exporting its TLS material. Mount the volume read-only into Traefik; its explicit name lets generated proxies mount the same volume.
 
 The development enrollment flow uses an unaudited OPAQUE implementation. Use [offline certificate provisioning](installation.md#offline-certificate-provisioning) or an external PKI for production.
 
@@ -50,7 +44,7 @@ The development enrollment flow uses an unaudited OPAQUE implementation. Use [of
 
 ### Master: Traefik And Bridge Master
 
-Create `/srv/traefik-bridge/compose.master.yml` on the master host. Replace the ACME email and ensure `whoami.example.com`-style DNS records point at this host before requesting certificates.
+From a directory where you keep Compose files on the master host, create `compose.master.yml`. Replace the ACME email and ensure `whoami.example.com`-style DNS records point at this host before requesting certificates.
 
 ```yaml
 services:
@@ -62,14 +56,14 @@ services:
       - "9445:8445"
     environment:
       BRIDGE_PROXY_IMAGE: ghcr.io/esaiaswestberg/traefik-bridge-proxy:latest
-      BRIDGE_PROXY_CERTIFICATE_MOUNT: /srv/traefik-bridge/master:/bridge
+      BRIDGE_PROXY_CERTIFICATE_MOUNT: bridge-master-data:/bridge
       BRIDGE_ENDPOINT_CIDRS: 10.0.0.20/32
       BRIDGE_ENROLLMENT_ADDRESS: :8445
       BRIDGE_ROUTE_TOKEN_LIFETIME: 5m
       BRIDGE_ROUTE_TOKEN_REFRESH_BEFORE: 1m
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /srv/traefik-bridge/master:/bridge
+      - bridge-master-data:/bridge
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/readyz >/dev/null"]
       interval: 10s
@@ -98,7 +92,7 @@ services:
       - "443:443"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /srv/traefik-bridge/master:/bridge:ro
+      - bridge-master-data:/bridge:ro
       - traefik-letsencrypt:/letsencrypt
     networks:
       - traefik-bridge
@@ -108,24 +102,33 @@ networks:
     name: traefik-bridge
 
 volumes:
+  bridge-master-data:
+    name: bridge-master-data
   traefik-letsencrypt:
 ```
 
 Start it:
 
 ```sh
-docker compose -f /srv/traefik-bridge/compose.master.yml up -d
-docker compose -f /srv/traefik-bridge/compose.master.yml ps
+docker compose -f compose.master.yml up -d
+docker compose -f compose.master.yml ps
 ```
 
-If Traefik already exists, retain its current Compose service and add the file-provider argument, the master data-directory mount, and the `traefik-bridge` network shown above. `bridge-master` generates `/bridge/bridge-transport.yml` on every start.
+If Traefik already exists, retain its current Compose service and add the file-provider argument, the read-only `bridge-master-data` volume mount, and the `traefik-bridge` network shown above. Define `bridge-master-data` as an external volume with `name: bridge-master-data` in that Compose file. `bridge-master` generates `/bridge/bridge-transport.yml` on every start.
+
+```yaml
+volumes:
+  bridge-master-data:
+    external: true
+    name: bridge-master-data
+```
 
 ### Slave: Bridge Slave
 
 For development pairing, retrieve the one-time pairing code from the master logs. No bootstrap CA, route-signing key, or enrollment secret transfer is required. The code pins the master's TLS identity and is consumed after one successful enrollment; retrieve a new code before pairing each additional slave. On the slave, prepare a writable credential directory.
 
 ```sh
-docker compose -f /srv/traefik-bridge/compose.master.yml logs bridge-master | grep pairing_code
+docker compose -f compose.master.yml logs bridge-master | grep pairing_code
 # Run on the slave.
 install -d -m 700 /srv/traefik-bridge/credentials
 export BRIDGE_DEVELOPMENT_PAIRING_CODE='bridge-pair-v1.example'
@@ -199,7 +202,7 @@ Use this method when Compose is unavailable. It creates the same components expl
 
 ### Master: Traefik And Bridge Master
 
-Run on the master after completing [Common Master Files](#common-master-files):
+Run on the master after reviewing [Master Data Volume](#master-data-volume):
 
 ```sh
 docker network create traefik-bridge 2>/dev/null || true
@@ -207,9 +210,9 @@ docker network create traefik-bridge 2>/dev/null || true
 docker run -d --name bridge-master --restart unless-stopped \
   -p 9443:8443 -p 9445:8445 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v /srv/traefik-bridge/master:/bridge \
+  -v bridge-master-data:/bridge \
   -e BRIDGE_PROXY_IMAGE=ghcr.io/esaiaswestberg/traefik-bridge-proxy:latest \
-  -e BRIDGE_PROXY_CERTIFICATE_MOUNT=/srv/traefik-bridge/master:/bridge \
+  -e BRIDGE_PROXY_CERTIFICATE_MOUNT=bridge-master-data:/bridge \
   -e BRIDGE_ENDPOINT_CIDRS=10.0.0.20/32 \
   -e BRIDGE_ENROLLMENT_ADDRESS=:8445 \
   ghcr.io/esaiaswestberg/traefik-bridge-master:latest
@@ -217,7 +220,7 @@ docker run -d --name bridge-master --restart unless-stopped \
 docker run -d --name traefik --restart unless-stopped \
   --network traefik-bridge -p 80:80 -p 443:443 \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  -v /srv/traefik-bridge/master:/bridge:ro \
+  -v bridge-master-data:/bridge:ro \
   -v traefik-letsencrypt:/letsencrypt \
   traefik:v3.6 \
   --entrypoints.web.address=:80 \
@@ -267,7 +270,7 @@ Portainer deploys the same Compose specifications as stacks.
 
 ### Master: Traefik And Bridge Master
 
-1. On the master host, complete [Common Master Files](#common-master-files).
+1. On the master host, review [Master Data Volume](#master-data-volume).
 2. In Portainer, open **Stacks**, select **Add stack**, and name it `traefik-bridge-master`.
 3. Paste the full master Compose specification from [Master: Traefik And Bridge Master](#master-traefik-and-bridge-master) above.
 4. Set the slave LAN address directly in `BRIDGE_ENDPOINT_CIDRS`, replace the ACME email, then deploy the stack.
@@ -302,6 +305,6 @@ docker exec bridge-master wget -q -O - http://localhost:8080/readyz
 
 - Restrict TCP 9443 and 9445 on the master to slave LAN/VPN addresses.
 - Restrict TCP 9444 on every slave to master LAN/VPN addresses.
-- Keep `/srv/traefik-bridge/master` and slave credentials private and backed up. Limit access to master logs while a pairing code is active.
+- Back up `bridge-master-data` and keep slave credentials private. Limit access to master logs while a pairing code is active.
 - Never expose Docker's API over TCP.
 - Development OPAQUE enrollment is unaudited; use offline provisioning or an external PKI in production.
