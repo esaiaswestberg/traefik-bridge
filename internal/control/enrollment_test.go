@@ -26,7 +26,7 @@ func TestEnrollmentSuccess(t *testing.T) {
 	listener, dial := startEnrollmentServer(t, authority, []byte("0123456789abcdef0123456789abcdef"))
 	_ = listener
 	dir := t.TempDir()
-	pair, ca, routeKey, slaveID, err := Enroll(context.Background(), EnrollmentClientConfig{Address: "bufnet", ServerName: "bridge-master", BootstrapCA: authority.CACertificate(), Secret: []byte("0123456789abcdef0123456789abcdef"), SlaveID: "slave-a", CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), RouteSigningKeyFile: filepath.Join(dir, "route-signing.key"), CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
+	pair, ca, routeKey, slaveID, err := Enroll(context.Background(), EnrollmentClientConfig{Address: bufnetTarget, ServerName: "bridge-master", BootstrapCA: authority.CACertificate(), Secret: []byte("0123456789abcdef0123456789abcdef"), SlaveID: "slave-a", CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), RouteSigningKeyFile: filepath.Join(dir, "route-signing.key"), CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestLegacyEnrollmentPreservesExplicitRouteSigningKey(t *testing.T) {
 	if err := os.WriteFile(routeKeyFile, legacyRouteKey, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, _, err := Enroll(context.Background(), EnrollmentClientConfig{Address: "bufnet", ServerName: "bridge-master", BootstrapCA: authority.CACertificate(), Secret: []byte("0123456789abcdef0123456789abcdef"), SlaveID: "slave-a", CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), RouteSigningKeyFile: routeKeyFile, CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
+	_, _, _, _, err := Enroll(context.Background(), EnrollmentClientConfig{Address: bufnetTarget, ServerName: "bridge-master", BootstrapCA: authority.CACertificate(), Secret: []byte("0123456789abcdef0123456789abcdef"), SlaveID: "slave-a", CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), RouteSigningKeyFile: routeKeyFile, CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestEnrollmentRejectsBadSecretWithoutCertificate(t *testing.T) {
 	authority := newAuthority(t)
 	_, dial := startEnrollmentServer(t, authority, []byte("0123456789abcdef0123456789abcdef"))
 	dir := t.TempDir()
-	_, _, _, _, err := Enroll(context.Background(), EnrollmentClientConfig{Address: "bufnet", ServerName: "bridge-master", BootstrapCA: authority.CACertificate(), Secret: []byte("fedcba9876543210fedcba9876543210"), SlaveID: "slave-a", CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), RouteSigningKeyFile: filepath.Join(dir, "route-signing.key"), CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
+	_, _, _, _, err := Enroll(context.Background(), EnrollmentClientConfig{Address: bufnetTarget, ServerName: "bridge-master", BootstrapCA: authority.CACertificate(), Secret: []byte("fedcba9876543210fedcba9876543210"), SlaveID: "slave-a", CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), RouteSigningKeyFile: filepath.Join(dir, "route-signing.key"), CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
 	if err == nil {
 		t.Fatal("enrollment succeeded with a bad secret")
 	}
@@ -102,7 +102,7 @@ func TestPairingEnrollmentWithoutBootstrapCA(t *testing.T) {
 	authority := newAuthority(t)
 	_, code, dial := startPairingEnrollmentServer(t, authority)
 	dir := t.TempDir()
-	pair, ca, _, slaveID, err := Enroll(context.Background(), EnrollmentClientConfig{Address: "bufnet", PairingCode: code, DataHost: "slave.example", SlaveID: "slave-a", CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), RouteSigningKeyFile: filepath.Join(dir, "route-signing.key"), CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
+	pair, ca, _, slaveID, err := Enroll(context.Background(), EnrollmentClientConfig{Address: bufnetTarget, PairingCode: code, DataHost: "slave.example", SlaveID: "slave-a", CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), RouteSigningKeyFile: filepath.Join(dir, "route-signing.key"), CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestPairingEnrollmentRejectsWrongCodeAndPin(t *testing.T) {
 		}
 		mutate(&parsed)
 		dir := t.TempDir()
-		_, _, _, _, err = Enroll(context.Background(), EnrollmentClientConfig{Address: "bufnet", PairingCode: parsed.String(), SlaveID: "slave-a", CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), RouteSigningKeyFile: filepath.Join(dir, "route-signing.key"), CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
+		_, _, _, _, err = Enroll(context.Background(), EnrollmentClientConfig{Address: bufnetTarget, PairingCode: parsed.String(), SlaveID: "slave-a", CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), RouteSigningKeyFile: filepath.Join(dir, "route-signing.key"), CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
 		if err == nil {
 			t.Fatal("enrollment succeeded with an altered pairing code")
 		}
@@ -136,7 +136,7 @@ func TestPairingCodeRotatesAfterEnrollment(t *testing.T) {
 	_, code, dial := startPairingEnrollmentServer(t, authority)
 	enrollWithCode(t, dial, code, "slave-a")
 	dir := t.TempDir()
-	_, _, _, _, err := Enroll(context.Background(), EnrollmentClientConfig{Address: "bufnet", PairingCode: code, SlaveID: "slave-b", CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), RouteSigningKeyFile: filepath.Join(dir, "route-signing.key"), CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
+	_, _, _, _, err := Enroll(context.Background(), EnrollmentClientConfig{Address: bufnetTarget, PairingCode: code, SlaveID: "slave-b", CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), RouteSigningKeyFile: filepath.Join(dir, "route-signing.key"), CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
 	if err == nil {
 		t.Fatal("reused pairing code enrolled a second slave")
 	}
@@ -146,7 +146,7 @@ func TestEnrollmentRequiresClientProof(t *testing.T) {
 	authority := newAuthority(t)
 	listener, _ := startEnrollmentServer(t, authority, []byte("0123456789abcdef0123456789abcdef"))
 	tlsConfig := &tls.Config{RootCAs: mustPool(t, authority.CACertificate()), ServerName: "bridge-master", MinVersion: tls.VersionTLS13}
-	connection, err := grpc.NewClient("bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }), grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
+	connection, err := grpc.NewClient(bufnetTarget, grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }), grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func startPairingEnrollmentServer(t *testing.T, authority *bridgecrypto.Authorit
 func enrollWithCode(t *testing.T, dial func(context.Context, string) (net.Conn, error), code, slaveID string) {
 	t.Helper()
 	dir := t.TempDir()
-	_, _, _, _, err := Enroll(context.Background(), EnrollmentClientConfig{Address: "bufnet", PairingCode: code, SlaveID: slaveID, CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), RouteSigningKeyFile: filepath.Join(dir, "route-signing.key"), CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
+	_, _, _, _, err := Enroll(context.Background(), EnrollmentClientConfig{Address: bufnetTarget, PairingCode: code, SlaveID: slaveID, CertificateFile: filepath.Join(dir, "slave.crt"), PrivateKeyFile: filepath.Join(dir, "slave.key"), CAFile: filepath.Join(dir, "ca.crt"), RouteSigningKeyFile: filepath.Join(dir, "route-signing.key"), CSRFile: filepath.Join(dir, "slave.csr"), DialContext: dial})
 	if err != nil {
 		t.Fatal(err)
 	}

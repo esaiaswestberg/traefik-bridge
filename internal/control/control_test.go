@@ -22,6 +22,8 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 )
 
+const bufnetTarget = "passthrough:///bufnet"
+
 func TestMTLSIdentityMustMatchHello(t *testing.T) {
 	authority := newAuthority(t)
 	pair := issueSlave(t, authority, "slave-a")
@@ -205,7 +207,7 @@ func startServer(t *testing.T, authority *bridgecrypto.Authority, config ServerC
 		if tlsErr != nil {
 			return nil, tlsErr
 		}
-		return grpc.NewClient("bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+		return grpc.NewClient(bufnetTarget, grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
 			return listener.Dial()
 		}), grpc.WithTransportCredentials(credentials.NewTLS(clientTLS)))
 	}
